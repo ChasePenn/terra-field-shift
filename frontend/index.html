@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crop Rotation Advisor</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;background:#f4f7f2;color:#1f2d1f}
+  header{background:#2f5d3a;color:#fff;padding:16px 20px}
+  header h1{margin:0;font-size:1.3rem} header p{margin:4px 0 0;opacity:.85;font-size:.9rem}
+  main{display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:16px;padding:16px}
+  @media(max-width:800px){main{grid-template-columns:1fr}}
+  .card{background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 4px #0002;margin-bottom:14px}
+  #map{height:260px;border-radius:8px}
+  label{display:block;margin:10px 0 2px;font-size:.85rem;font-weight:600}
+  select,input[type=range]{width:100%}
+  button{width:100%;margin-top:14px;padding:12px;font-size:1rem;background:#2f5d3a;color:#fff;border:0;border-radius:8px;cursor:pointer}
+  .bar{height:8px;background:#e2e8e0;border-radius:4px;margin:2px 0 8px}
+  .bar div{height:100%;border-radius:4px}
+  .chips span{display:inline-block;background:#eaf2e6;border-radius:12px;padding:4px 10px;margin:3px 3px 0 0;font-size:.82rem}
+  .rot{font-weight:700;margin:0 0 4px} .total{float:right;color:#2f5d3a}
+  .row{display:flex;justify-content:space-between;font-size:.8rem}
+  ul{margin:6px 0 0;padding-left:18px;font-size:.88rem}
+  small{color:#5b6b5b}
+</style>
+</head>
+<body>
+<header>
+  <h1>Crop Rotation Advisor</h1>
+  <p>NASA Earth observations + soil + your priorities → rotation options</p>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <label>Demo region</label>
+      <select id="preset">
+        <option value="33.45,-112.07">Phoenix, Arizona (dry)</option>
+        <option value="42.03,-93.62">Ames, Iowa (humid)</option>
+        <option value="30.90,75.85">Punjab, India (irrigated plains)</option>
+      </select>
+      <div id="map" style="margin-top:10px"></div>
+      <small id="coords"></small>
+      <label>Soil organic matter</label>
+      <select id="om"><option>low</option><option selected>medium</option><option>high</option></select>
+      <label>Soil texture</label>
+      <select id="texture"><option value="sandy">sandy</option><option value="loam" selected>loam</option><option value="clay">clay</option></select>
+      <label><input type="checkbox" id="future"> Show 2050-style warmer, drier scenario</label>
+    </div>
+    <div class="card">
+      <strong>Your priorities</strong>
+      <label>Save water <input type="range" id="w_water" min="0" max="5" value="3"></label>
+      <label>Build soil health <input type="range" id="w_soil" min="0" max="5" value="3"></label>
+      <label>Climate resilience <input type="range" id="w_climate" min="0" max="5" value="3"></label>
+      <label>Income <input type="range" id="w_income" min="0" max="5" value="1"></label>
+      <button id="go">Find rotations</button>
+    </div>
+  </section>
+  <section>
+    <div class="card" id="profile"><em>Pick a location and press “Find rotations”. The first run for a new location can take 10–30 seconds while NASA data downloads.</em></div>
+    <div id="results"></div>
+    <small>Guidance only, not a guarantee. Validate with a local agronomist. Data: NASA POWER (temperature, rainfall, root-zone soil wetness).</small>
+  </section>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let lat = 33.45, lon = -112.07;
+const map = L.map('map').setView([lat, lon], 5);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution: '© OpenStreetMap'}).addTo(map);
+let marker = L.marker([lat, lon]).addTo(map);
+
+function setPoint(a, b, move) {
+  lat = +a.toFixed(2); lon = +b.toFixed(2);
+  marker.setLatLng([lat, lon]);
+  if (move) map.setView([lat, lon], 5);
+  document.getElementById('coords').textContent = `Selected: ${lat}, ${lon}`;
+}
+setPoint(lat, lon);
+map.on('click', e => setPoint(e.latlng.lat, e.latlng.lng, false));
+document.getElementById('preset').onchange = e => {
+  const [a, b] = e.target.value.split(',').map(Number); setPoint(a, b, true);
+};
+
+const color = v => v >= 70 ? '#3c8d4f' : v >= 45 ? '#d9a62e' : '#c75b4a';
+const bar = (name, v) => `<div class="row"><span>${name}</span><span>${v}</span></div>
+  <div class="bar"><div style="width:${v}%;background:${color(v)}"></div></div>`;
+
+document.getElementById('go').onclick = async () => {
+  const g = id => document.getElementById(id);
+  g('results').innerHTML = '';
+  g('profile').innerHTML = '<em>Loading NASA data and scoring rotations…</em>';
+  try {
+    const res = await fetch('/recommend', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        lat, lon, organic_matter: g('om').value, texture: g('texture').value,
+        future: g('future').checked,
+        w_water: +g('w_water').value, w_soil: +g('w_soil').value,
+        w_climate: +g('w_climate').value, w_income: +g('w_income').value
+      })
+    });
+    if (!res.ok) throw new Error('Server error ' + res.status);
+    const d = await res.json(), p = d.profile;
+    g('profile').innerHTML = `<strong>Field profile (NASA POWER, 2005–2024${g('future').checked ? ', warmer scenario' : ''})</strong>
+      <div class="chips">
+        <span>🌧 ${p.rain_mm} mm rain/yr</span><span>🔥 ${p.heat_days} days &gt; 35°C</span>
+        <span>🏜 ${p.dry_spells} dry spells/yr</span><span>💧 root-zone wetness ${p.soil_wetness}</span>
+        <span>Water stress ${p.water_stress}</span></div>`;
+    g('results').innerHTML = d.results.map((r, i) => `
+      <div class="card">
+        <p class="rot">${i + 1}. ${r.rotation.map((c, y) => `Y${y + 1} ${c}`).join(' → ')}
+          <span class="total">${r.scores.total}/100</span></p>
+        ${bar('Water efficiency', r.scores.water)}${bar('Soil health', r.scores.soil)}
+        ${bar('Climate resilience', r.scores.climate)}${bar('Income', r.scores.income)}
+        <ul>${r.why.map(w => `<li>${w}</li>`).join('')}</ul>
+      </div>`).join('');
+  } catch (err) {
+    g('profile').innerHTML = '<strong>Something went wrong:</strong> ' + err.message;
+  }
+};
+</script>
+</body>
+</html>

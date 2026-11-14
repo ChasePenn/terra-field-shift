@@ -1,0 +1,10 @@
+crop,water_need,heat_tolerance,drought_tolerance,fixes_nitrogen,root_depth,soil_cover_benefit,family,income
+wheat,3,2,3,0,3,3,Poaceae,3
+corn,4,3,2,0,4,2,Poaceae,4
+sorghum,2,5,5,0,5,3,Poaceae,2
+barley,2,2,4,0,3,3,Poaceae,2
+soybean,3,3,2,1,3,2,Fabaceae,4
+lentil,2,3,4,1,2,2,Fabaceae,3
+clover_cover,2,3,3,1,3,5,Fabaceae,1
+canola,3,2,2,0,4,3,Brassicaceae,3
+potato,4,2,1,0,1,2,Solanaceae,4

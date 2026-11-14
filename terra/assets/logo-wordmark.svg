@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 64">
+  <defs><clipPath id="g"><circle cx="32" cy="38" r="19"/></clipPath></defs>
+  <rect width="64" height="64" rx="18" fill="#10120c"/>
+  <circle cx="32" cy="38" r="19" fill="#d6f45c"/>
+  <g clip-path="url(#g)" fill="none" stroke="#10120c" stroke-linecap="round" stroke-width="3.4">
+    <path d="M8 41c10-7.5 38-7.5 48 0"/><path d="M8 49c10-7.5 38-7.5 48 0"/><path d="M8 57c10-7.5 38-7.5 48 0"/>
+  </g>
+  <circle cx="49" cy="15" r="3.6" fill="#d6f45c"/>
+  <path d="M11 27C18 17 34 11 44 13" fill="none" stroke="#d6f45c" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="0.1 5"/>
+  <text x="80" y="45" font-family="Outfit, system-ui, sans-serif" font-size="40" font-weight="600" letter-spacing="-1" fill="#f3f5ee">terra</text>
+</svg>
