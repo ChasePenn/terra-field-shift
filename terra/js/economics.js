@@ -114,7 +114,7 @@ export function grossRevenue(cropId, prices = {}) {
 
 // Relative yield after a water shortfall (FAO Ky), valid to about a 50% deficit.
 export function yieldFactor(ky, deficit) {
-  const d = Math.max(0, Math.min(0.6, deficit));
+  const d = Math.max(0, Math.min(1, deficit));
   return Math.max(0, 1 - ky * d);
 }
 
