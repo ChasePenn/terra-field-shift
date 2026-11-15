@@ -14,6 +14,8 @@
 // POWER is required: without it the script fails and the old site stays up.
 
 import fs from 'node:fs';
+import zlib from 'node:zlib';
+import { parseColormap, compositeDates, ndviUrl, decodeColor, GIBS_COLORMAP } from '../terra/js/gibs.js';
 import { penmanMonteithET0, hargreavesET0, extraterrestrialRadiation, esat, dayOfYear, vpd, HEAT_L1_C } from '../terra/js/et.js';
 
 const OUT = 'terra/data';
@@ -91,22 +93,57 @@ async function soil(lat, lon) {
   return out.sand == null ? null : out;
 }
 
-// ---------------- MODIS NDVI (ORNL DAAC) ----------------
-// MOD13Q1, 250 m, 16-day composites, for the last 5 full years.
-async function ndvi(lat, lon) {
-  const base = 'https://modis.ornl.gov/rst/api/v1/MOD13Q1';
-  const q = `latitude=${lat}&longitude=${lon}`;
-  const dates = (await get(`${base}/dates?${q}`, { timeout: 180000 })).dates
-    .filter((d) => d.calendar_date >= '2020-01-01' && d.calendar_date <= '2024-12-31');
-  const rows = [];
-  for (let i = 0; i < dates.length; i += 10) {
-    const ch = dates.slice(i, i + 10);
-    const j = await get(`${base}/subset?${q}&band=250m_16_days_NDVI&startDate=${ch[0].modis_date}&endDate=${ch[ch.length - 1].modis_date}&kmAboveBelow=0&kmLeftRight=0`, { timeout: 180000 });
-    const scale = parseFloat(j.scale) || 0.0001;
-    for (const s of j.subset) if (s.data[0] > -2000) rows.push([s.calendar_date, round(s.data[0] * scale, 3)]);
-    await sleep(500);
+// ---------------- MODIS NDVI (NASA GIBS) ----------------
+// Minimal PNG reader: 8-bit RGB, RGBA or palette images, as GIBS serves them.
+function pngPixel(buf, x, y) {
+  let p = 8, w, h, type, pal, trns;
+  const idat = [];
+  while (p < buf.length) {
+    const len = buf.readUInt32BE(p), kind = buf.toString('ascii', p + 4, p + 8), data = buf.subarray(p + 8, p + 8 + len);
+    if (kind === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); type = data[9]; if (data[8] !== 8) throw new Error('bit depth'); }
+    else if (kind === 'PLTE') pal = data;
+    else if (kind === 'tRNS') trns = data;
+    else if (kind === 'IDAT') idat.push(data);
+    else if (kind === 'IEND') break;
+    p += 12 + len;
   }
-  return rows;
+  const bpp = type === 6 ? 4 : type === 2 ? 3 : type === 4 ? 2 : 1;
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = w * bpp, out = Buffer.alloc(h * stride);
+  for (let r = 0; r < h; r++) {
+    const f = raw[r * (stride + 1)];
+    for (let i = 0; i < stride; i++) {
+      const v = raw[r * (stride + 1) + 1 + i];
+      const a = i >= bpp ? out[r * stride + i - bpp] : 0, b = r ? out[(r - 1) * stride + i] : 0, c = r && i >= bpp ? out[(r - 1) * stride + i - bpp] : 0;
+      let pr = 0;
+      if (f === 1) pr = a; else if (f === 2) pr = b; else if (f === 3) pr = (a + b) >> 1;
+      else if (f === 4) { const q = a + b - c, pa = Math.abs(q - a), pb = Math.abs(q - b), pc = Math.abs(q - c); pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+      out[r * stride + i] = (v + pr) & 255;
+    }
+  }
+  const o = y * stride + x * bpp;
+  if (type === 6) return [out[o], out[o + 1], out[o + 2], out[o + 3]];
+  if (type === 2) return [out[o], out[o + 1], out[o + 2], 255];
+  if (type === 3) { const k = out[o]; return [pal[k * 3], pal[k * 3 + 1], pal[k * 3 + 2], trns && k < trns.length ? trns[k] : 255]; }
+  throw new Error(`png type ${type}`);
+}
+
+let colormap;
+async function ndvi(lat, lon) {
+  colormap ||= parseColormap(await get(GIBS_COLORMAP, { json: false }));
+  const rows = [];
+  const dates = compositeDates(2020, 2024);
+  for (let i = 0; i < dates.length; i += 6) {
+    await Promise.all(dates.slice(i, i + 6).map(async (d) => {
+      try {
+        const res = await fetch(ndviUrl(lat, lon, d), { signal: AbortSignal.timeout(60000) });
+        if (!res.ok) return;
+        const v = decodeColor(colormap, ...pngPixel(Buffer.from(await res.arrayBuffer()), 1, 1));
+        if (v != null) rows.push([d, v]);
+      } catch { /* skip this composite */ }
+    }));
+  }
+  return rows.sort((a, b) => a[0].localeCompare(b[0]));
 }
 
 // ---------------- wells: USGS Water Data API (includes ADWR measurements) ----------------
@@ -277,7 +314,7 @@ async function validation() {
 // ---------------- main ----------------
 fs.mkdirSync(OUT, { recursive: true });
 const demo = {
-  about: 'Real data from NASA POWER (daily, community AG), ISRIC SoilGrids 2.0, MODIS MOD13Q1 NDVI (ORNL DAAC) and USGS Water Data (well levels, including ADWR measurements) for the four demo farms.',
+  about: 'Real data from NASA POWER (daily, community AG), ISRIC SoilGrids 2.0, MODIS 16-day NDVI from NASA GIBS and USGS Water Data (well levels, including ADWR measurements) for the four demo farms.',
   fetched: new Date().toISOString().slice(0, 10), farms: {}, soil: {}, ndvi: {}, wells: {},
 };
 for (const [id, [lat, lon]] of Object.entries(FARMS)) {

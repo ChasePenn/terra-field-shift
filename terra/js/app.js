@@ -115,7 +115,7 @@ async function loadField() {
   else fetchSoil(lat, lon, signal).then((s) => { state.soil = s; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.soil = { error: true }; renderField(); } });
   const toRows = (r) => r.map((x) => (Array.isArray(x) ? x : [x.date, x.ndvi]));
   if (bundledNdvi && bundledNdvi.length) state.ndvi = toRows(bundledNdvi);
-  else fetchNdvi(lat, lon, 4, signal).then((r) => { state.ndvi = toRows(r); renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.ndvi = { error: true }; renderField(); } });
+  else fetchNdvi(lat, lon, 5, signal).then((r) => { state.ndvi = toRows(r); renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.ndvi = { error: true }; renderField(); } });
   const bundledWells = demo?.wells?.[id];
   if (bundledWells) state.wells = bundledWells;
   else if (az) fetchWells(lat, lon, signal).then((w) => { state.wells = w; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.wells = []; renderField(); } });
@@ -603,7 +603,7 @@ function renderLearn() {
   const terms = ['acft', 'et', 'ndvi', 'sm', 'gw', 'leg', 'cover', 'fallow', 'sat'];
   const nasa = [
     ['NASA POWER (temperature, dew point, wind, sunlight, rain)', 'https://power.larc.nasa.gov/'],
-    ['MODIS MOD13Q1 NDVI (ORNL DAAC)', 'https://modis.ornl.gov/data/modis_webservice.html'],
+    ['MODIS Terra 16-day NDVI (MOD13), read from NASA GIBS', 'https://nasa-gibs.github.io/gibs-api-docs/available-visualizations/'],
     ['NASA GIBS: MODIS NDVI, SMAP L4, GRACE/GRACE-FO', 'https://nasa-gibs.github.io/gibs-api-docs/'],
     ['ISRIC SoilGrids 2.0', 'https://soilgrids.org/'],
     ['University of Arizona AZMET weather stations (API)', 'https://azmet.arizona.edu/'],

@@ -1,8 +1,8 @@
+import { parseColormap, compositeDates, ndviUrl, decodeColor, GIBS_COLORMAP } from './gibs.js';
 // Live NASA data, fetched straight from the browser. Nothing here is made up:
 // if a request fails, the app says so instead of filling in numbers.
 
 const POWER_URL = 'https://power.larc.nasa.gov/api/temporal/daily/point';
-const ORNL_URL = 'https://modis.ornl.gov/rst/api/v1/MOD13Q1';
 
 // Crop years 2005-2024 (Nov 2004 to Oct 2024).
 export const RECORD = { start: '20041101', end: '20241031' };
@@ -70,34 +70,36 @@ export async function fetchPower(lat, lon, signal) {
   return out;
 }
 
-// MODIS MOD13Q1 NDVI (250 m, 16-day) from the ORNL DAAC web service.
-export async function fetchNdvi(lat, lon, years = 3, signal) {
-  const key = `terra-ndvi-v1-${lat.toFixed(3)}-${lon.toFixed(3)}`;
+// MODIS NDVI (16-day, 250 m) decoded from NASA GIBS images: see gibs.js.
+let cmapPromise;
+export async function fetchNdvi(lat, lon, years = 5, signal) {
+  const key = `terra-ndvi-v2-${lat.toFixed(3)}-${lon.toFixed(3)}`;
   const cached = cacheGet(key);
-  if (cached && Date.now() - cached.t < 7 * 864e5) return cached.data;
-  const q = `latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}`;
-  const head = { headers: { Accept: 'application/json' }, signal };
-  signal = withTimeout(signal, 25000);
-  const h2 = { ...head, signal };
-  const dres = await fetch(`${ORNL_URL}/dates?${q}`, h2);
-  if (!dres.ok) throw new Error(`MODIS dates answered ${dres.status}`);
-  const all = (await dres.json()).dates;
-  const want = all.slice(-23 * years);
-  const chunks = [];
-  for (let i = 0; i < want.length; i += 10) chunks.push(want.slice(i, i + 10));
+  if (cached && Date.now() - cached.t < 30 * 864e5) return cached.data;
+  cmapPromise ||= fetch(GIBS_COLORMAP).then((r) => r.text()).then(parseColormap);
+  const cmap = await cmapPromise;
+  const y1 = new Date().getUTCFullYear() - 1;
+  const dates = compositeDates(y1 - years + 1, y1);
   const rows = [];
-  for (const ch of chunks) {
-    const url = `${ORNL_URL}/subset?${q}&band=250m_16_days_NDVI&startDate=${ch[0].modis_date}&endDate=${ch[ch.length - 1].modis_date}&kmAboveBelow=0&kmLeftRight=0`;
-    const r = await fetch(url, h2);
-    if (!r.ok) throw new Error(`MODIS subset answered ${r.status}`);
-    const j = await r.json();
-    const scale = parseFloat(j.scale) || 0.0001;
-    for (const s of j.subset) {
-      const v = s.data[0];
-      if (v > -2000) rows.push({ date: s.calendar_date, ndvi: v * scale });
-    }
+  const canvas = new OffscreenCanvas(3, 3);
+  const g = canvas.getContext('2d', { willReadFrequently: true });
+  for (let i = 0; i < dates.length; i += 8) {
+    if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
+    await Promise.all(dates.slice(i, i + 8).map(async (d) => {
+      try {
+        const res = await fetch(ndviUrl(lat, lon, d), { signal: withTimeout(signal, 20000) });
+        if (!res.ok) return;
+        const img = await createImageBitmap(await res.blob());
+        g.clearRect(0, 0, 3, 3);
+        g.drawImage(img, 0, 0);
+        const p = g.getImageData(1, 1, 1, 1).data;
+        const v = decodeColor(cmap, p[0], p[1], p[2], p[3]);
+        if (v != null) rows.push([d, v]);
+      } catch (e) { if (e.name === 'AbortError' && signal?.aborted) throw e; }
+    }));
   }
-  rows.sort((a, b) => a.date.localeCompare(b.date));
+  rows.sort((a, b) => a[0].localeCompare(b[0]));
+  if (rows.length < 20) throw new Error('not enough satellite images');
   cacheSet(key, { t: Date.now(), data: rows });
   return rows;
 }
