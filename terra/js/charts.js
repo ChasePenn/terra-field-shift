@@ -6,19 +6,27 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 
 export function grade(v) { return t(v >= 80 ? 'gGreat' : v >= 60 ? 'gGood' : v >= 40 ? 'gOk' : 'gPoor'); }
 
-export function ring(value, label, size = 76) {
+export function ring(value, label, size = 76, key = '', sub = '') {
   const r = size / 2 - 6, c = 2 * Math.PI * r, off = c * (1 - value / 100);
-  return `<div class="ring" style="--s:${size}px">
+  return `<button class="ring" style="--s:${size}px" data-score="${key}" aria-label="${esc(label)} ${value} of 100">
     <svg viewBox="0 0 ${size} ${size}" aria-hidden="true">
       <circle cx="${size / 2}" cy="${size / 2}" r="${r}" class="ring-bg"/>
       <circle cx="${size / 2}" cy="${size / 2}" r="${r}" class="ring-fg" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 ${size / 2} ${size / 2})"/>
     </svg>
-    <b>${esc(grade(value))}</b><span>${esc(label)}</span>
-  </div>`;
+    <b>${value}<small>/100</small></b><span>${esc(label)}</span>${sub ? `<em>${esc(sub)}</em>` : ''}<i>${esc(grade(value))}</i>
+  </button>`;
 }
 
-export function rings(s) {
-  return `<div class="rings">${ring(s.water, t('rWater'))}${ring(s.soil, t('rSoil'))}${ring(s.resilience, t('rSafety'))}${ring(s.income, t('rIncome'))}</div>`;
+// Four scores, each with the plain number behind it. Tap one for how it is worked out.
+export function rings(s, d) {
+  const pct = (v) => Math.round(100 * v);
+  const sub = d ? {
+    water: d.waterPct != null ? t('subWater', { p: pct(d.waterPct) }) : '',
+    soil: '',
+    resilience: t('subSafe', { n: d.good, t: d.years }),
+    income: d.incomePct != null ? t('subIncome', { p: pct(d.incomePct) }) : '',
+  } : {};
+  return `<div class="rings">${ring(s.water, t('rWater'), 76, 'water', sub.water)}${ring(s.soil, t('rSoil'), 76, 'soil', sub.soil)}${ring(s.resilience, t('rSafety'), 76, 'resilience', sub.resilience)}${ring(s.income, t('rIncome'), 76, 'income', sub.income)}</div><p class="muted small ring-tip">${t('ringTip')}</p>`;
 }
 
 function riskMonths(r) {
@@ -92,6 +100,11 @@ const P = {
   sat: '<rect x="9" y="9" width="6" height="6" rx="1" transform="rotate(45 12 12)"/><path d="M4 4l4 4m8 8 4 4M14 4l-2 2m-6 6-2 2"/>',
   coin: '<circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .8-3 2s1.3 1.7 3 2 3 .8 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.5M12 6v2m0 8v2"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
+  heart: '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4.5-6 8-6s7 2 8 6"/>',
+  alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4m0 3v.5"/>',
+  saved: '<path d="M6 3h12v18l-6-4-6 4z"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17v.5"/>',
   home: '<path d="M4 11l8-7 8 7v9a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z"/>',
 };
 export const icon = (name, size = 22) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;

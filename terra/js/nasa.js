@@ -227,3 +227,19 @@ export async function fetchWells(lat, lon, signal) {
   cacheSet(key, out);
   return out;
 }
+
+// Next 7 days for the field (Open-Meteo, free, no key) and official US warnings
+// (National Weather Service). Used by the dashboard to warn before storms and heat.
+export async function fetchForecast(lat, lon, signal) {
+  const q = new URLSearchParams({ latitude: lat.toFixed(3), longitude: lon.toFixed(3), daily: 'temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max', timezone: 'auto', forecast_days: '7', temperature_unit: 'fahrenheit', precipitation_unit: 'inch' });
+  const res = await fetch(`https://api.open-meteo.com/v1/forecast?${q}`, { signal });
+  if (!res.ok) throw new Error(`Forecast answered ${res.status}`);
+  const d = (await res.json()).daily;
+  return d.time.map((date, i) => ({ date, tmax: d.temperature_2m_max[i], tmin: d.temperature_2m_min[i], rain: d.precipitation_sum[i] || 0, chance: d.precipitation_probability_max?.[i] ?? null }));
+}
+export async function fetchAlerts(lat, lon, signal) {
+  const res = await fetch(`https://api.weather.gov/alerts/active?point=${lat.toFixed(4)},${lon.toFixed(4)}`, { signal, headers: { Accept: 'application/geo+json' } });
+  if (!res.ok) return [];
+  const j = await res.json();
+  return (j.features || []).map((f) => ({ event: f.properties.event, headline: f.properties.headline, ends: f.properties.ends || f.properties.expires, severity: f.properties.severity }));
+}

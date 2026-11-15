@@ -9,7 +9,7 @@
 //      stations inside Arizona (see scripts/fetch-data.mjs). Days missing
 //      sunlight, humidity or wind use Hargreaves (FAO-56 eq. 52).
 //   2. Crop water use = Kc x ET0, with FAO-56 crop coefficient curves.
-//   3. Irrigation need = crop water use minus effective rain (75% of rain).
+//   3. Irrigation need = crop water use minus effective rain (USDA-SCS monthly method, FAO CROPWAT).
 //   4. Every rotation is replayed against each real crop year in the record.
 
 import { CROPS, WINTER, SUMMER, BEFORE_COTTON, CY_MONTHS, CALENDAR_AREA } from './crops.js';
@@ -20,7 +20,11 @@ export { extraterrestrialRadiation, hargreavesET0 };
 
 export const MM_PER_ACFT = 304.8;
 export const GALLONS_PER_ACFT = 325851;
-export const EFFECTIVE_RAIN = 0.75;
+// Share of a month's rain a crop can use. USDA Soil Conservation Service method as
+// used in FAO CROPWAT: small showers count almost fully, big storms run off.
+export function effectiveRain(mm) {
+  return mm <= 250 ? mm * (125 - 0.2 * mm) / 125 : 125 + 0.1 * mm;
+}
 export const IRRIGATION_EFFICIENCY = { drip: 0.9, sprinkler: 0.8, furrow: 0.7 };
 
 // Arizona, where the AZMET bias correction was fitted and checked.
@@ -247,7 +251,7 @@ export function buildYearTable(prep, types, efficiency) {
       }
       const rain = monthlyRain(prep, cy);
       let net = 0;
-      for (let k = 0; k < 12; k++) if (etc[k] > 0) net += Math.max(0, etc[k] - EFFECTIVE_RAIN * rain[k]);
+      for (let k = 0; k < 12; k++) if (etc[k] > 0) net += Math.max(0, etc[k] - effectiveRain(rain[k]));
       perYear.set(cy, { etcMm: etc.reduce((a, b) => a + b, 0), netAcft: net / MM_PER_ACFT, grossAcft: net / MM_PER_ACFT / efficiency, hits });
     }
     table.set(yt.id, perYear);
@@ -321,7 +325,7 @@ export function evaluate(rotation, ctx) {
   const money = { mean: avg(profits), low: quantile(profits, 0.1), high: quantile(profits, 0.9), cash: avg(cashes), cashLow: quantile(cashes, 0.1), cashHigh: quantile(cashes, 0.9), waterCost: avg(replay.map((r) => r.waterCost)), revenue: avg(replay.map((r) => r.revenue)) };
   // What each Colorado River shortage level would do to this plan.
   const tiers = {};
-  if (ctx.lite) return { money };
+  if (ctx.lite) return { money, grossAcft };
   for (const tier of Object.keys(SHORTAGE)) {
     const rep = tier === (ctx.shortage || 'none') ? replay : outcome(supplyAfter(allotment, ctx.capShare || 0, tier));
     tiers[tier] = { good: rep.filter((r) => r.status === 'good').length, profit: avg(rep.map((r) => r.profit)), cash: avg(rep.map((r) => r.cash)), supply: supplyAfter(allotment, ctx.capShare || 0, tier) };
@@ -367,10 +371,17 @@ export function evaluate(rotation, ctx) {
   soil = clamp(soil);
 
   const ratio = grossAcft / supply;
-  // Using water you have is fine; going over your supply is not. Score falls
-  // gently from 60% of your supply and steeply once a plan needs more than you have.
-  const water = clamp(100 - 40 * Math.max(0, ratio - 0.6) - 80 * Math.max(0, ratio - 1));
-  const resilience = clamp((100 * replay.reduce((a, r) => a + (r.status === 'good' ? 1 : r.status === 'warn' ? 0.5 : 0), 0)) / replay.length);
+  // Water: where this plan's water need sits among every plan that fits this field
+  // (100 = thirstiest-free end). A plan that needs more than your supply cannot score
+  // above the share of your supply it leaves unused.
+  let water = ctx.waterRank ? 100 * (1 - rankOf(ctx.waterRank, grossAcft)) : clamp(100 * (1 - ratio));
+  if (ratio > 1) water = Math.min(water, clamp(100 * (2 - ratio) * 0.4));
+  water = clamp(water);
+  const good = replay.filter((r) => r.status === 'good').length, warn = replay.filter((r) => r.status === 'warn').length;
+  const resilience = clamp((100 * (good + 0.5 * warn)) / replay.length);
+  // Worst three years: average share of water need you could not cover.
+  const shortfalls = replay.map((r) => Math.max(0, 1 - supply / (r.worstGross || 1))).sort((a, b) => b - a);
+  const worst3 = avg(shortfalls.slice(0, 3));
   // Income: where this plan's average profit sits among all plans checked.
   const income = ctx.profitRank ? clamp(100 * rankOf(ctx.profitRank, money.mean)) : 50;
 
@@ -384,6 +395,7 @@ export function evaluate(rotation, ctx) {
     families: [...families], pestBreak, sameCropRepeats, alfalfaYears,
     scores: { water: Math.round(water), soil: Math.round(soil), resilience: Math.round(resilience), income: Math.round(income), total: Math.round(total * 10) / 10 },
     confidence: confidenceFor(seq, ctx),
+    detail: { ratio, good, warn, years: replay.length, worst3, incomePct: ctx.profitRank ? rankOf(ctx.profitRank, money.mean) : null, waterPct: ctx.waterRank ? 1 - rankOf(ctx.waterRank, grossAcft) : null, plans: ctx.waterRank ? ctx.waterRank.length : 0 },
   };
 }
 
@@ -504,11 +516,18 @@ export function run(weather, inputs) {
   const rots = enumerateRotations(ctx.types, excluded);
   // First pass finds every plan's profit, second pass scores income against them.
   ctx.lite = true;
-  ctx.profitRank = rots.map((rot) => evaluate(rot, ctx).money.mean).sort((a, b) => a - b);
+  const lite = rots.map((rot) => evaluate(rot, ctx));
+  ctx.profitRank = lite.map((x) => x.money.mean).sort((a, b) => a - b);
+  ctx.waterRank = lite.map((x) => x.grossAcft).sort((a, b) => a - b);
   ctx.lite = false;
   const all = rots.map((rot) => evaluate(rot, ctx));
   const baseline = evaluate(inputs.baseline, ctx);
   const options = rank(all, inputs.baseline, inputs.count || 3);
+  // Always offer the plan that held up best in this field's worst past years:
+  // most years within supply, then smallest shortfall in the three worst years, then income.
+  const safest = all.filter((r) => r.rotation.join() !== inputs.baseline.join())
+    .sort((a, b) => b.detail.good - a.detail.good || a.detail.worst3 - b.detail.worst3 || b.money.mean - a.money.mean)[0];
+  if (safest) { safest.safest = true; if (!options.includes(safest)) options.push(safest); }
   for (const o of [baseline, ...options]) { o.explain = explain(o, baseline); o.plan = monthPlan(o); }
   return { prep: ctx.prep, climate: climate(ctx.prep, ctx.canopy), baseline, options, all, ctx };
 }

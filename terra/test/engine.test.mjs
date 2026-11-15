@@ -68,7 +68,7 @@ for (const [crop, yt] of Object.entries(single)) {
 }
 
 // 5. Output shape: baseline plus 3 distinct options, explanations, replay.
-assert.equal(res.options.length, 3);
+assert.ok(res.options.length >= 3 && res.options.length <= 4 && res.options.some((o) => o.safest));
 for (const o of [res.baseline, ...res.options]) {
   assert.equal(o.calendar.length, 36);
   assert.equal(o.replay.length, res.prep.cropYears.length);

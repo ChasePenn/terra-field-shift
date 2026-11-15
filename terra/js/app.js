@@ -1,6 +1,7 @@
 import { CROPS, SOURCES, WINTER, SUMMER, BEFORE_COTTON, REFERENCE_USE_IN } from './crops.js';
 import { fmt, GALLONS_PER_ACFT } from './engine.js';
-import { fetchPower, fetchNdvi, fetchRecent, fetchSoil, fetchWells, loadDemo, loadBundle, demoWeather, textureClass, LAYERS } from './nasa.js';
+import { fetchPower, fetchNdvi, fetchRecent, fetchSoil, fetchWells, fetchForecast, fetchAlerts, loadDemo, loadBundle, demoWeather, textureClass, LAYERS } from './nasa.js';
+import { initAccount, onAccount, accountsReady, signIn, signOutNow, savePlan, removePlan, getPlans } from './account.js';
 import { rings, calendarStrip, replayStrip, sparkline, icon, yearBars, depthLine, pairBars, flowDiagram } from './charts.js';
 import { inArizona, yearTypes } from './engine.js';
 import { findArea, AREA_FACTS, GW_SOURCES, wellTrend, wellSeries, satelliteCheck } from './local.js';
@@ -42,12 +43,13 @@ const state = {
   waterPrice: saved.waterPrice ?? WATER_PRICE_DEFAULT,
   shortage: 'none',
   wells: null, area: undefined, val: null, ama: null,
-  goals: new Set(saved.goals || ['water', 'soil']),
+  goals: new Set(saved.goals || []),
   excluded: new Set(saved.excluded || []),
   stress: { dT: 0, rainPct: 0 },
   screen: 'field', layer: 'none', plan: 1,
   weather: null, res: null, build: null, buildResult: null,
   ndvi: null, soil: null, recent: null, loadError: null,
+  forecast: null, alerts: null, account: { user: null, plans: [], cloud: false }, savedScores: null,
 };
 function load() { try { return JSON.parse(localStorage.getItem('terra-farm') || '{}'); } catch { return {}; } }
 function persist() {
@@ -63,7 +65,7 @@ const weights = () => {
 
 // ---------- worker ----------
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-let runId = 0, scoreId = 0;
+let runId = 0, scoreId = 0, manyId = 0;
 worker.onmessage = (e) => {
   const m = e.data;
   if (m.type === 'run') {
@@ -73,6 +75,11 @@ worker.onmessage = (e) => {
     if (!state.build) state.build = state.baseline.slice();
     renderAll();
     scoreBuild();
+    scoreSaved();
+  } else if (m.type === 'scoreMany') {
+    if (m.id !== manyId || !m.ok) return;
+    state.savedScores = m.results;
+    renderSaved();
   } else if (m.type === 'score') {
     if (m.id !== scoreId || !m.ok) return;
     state.buildResult = m.result;
@@ -87,6 +94,14 @@ function recompute() {
     runId++;
     worker.postMessage({ id: runId, type: 'run', weather: state.weather, inputs: { baseline: state.baseline, allotment: state.allotment, irrigation: state.irrigation, excluded: [...state.excluded], weights: weights(), stress: state.stress, calib: state.val?.et0, canopy: state.val?.canopy, capShare: CAP_SHARE[state.source] ?? 0, shortage: state.shortage, waterPrice: state.waterPrice } });
   }, 160);
+}
+function farmPlans() { return state.account.plans.filter((p) => Math.abs(p.farm.lat - state.farm.lat) < 0.01 && Math.abs(p.farm.lon - state.farm.lon) < 0.01); }
+function scoreSaved() {
+  const list = farmPlans();
+  state.savedScores = null;
+  if (!state.res || !list.length) return renderSaved();
+  manyId++;
+  worker.postMessage({ id: manyId, type: 'scoreMany', rotations: list.map((p) => p.rotation) });
 }
 function scoreBuild() {
   if (!state.res || !state.build) return;
@@ -120,6 +135,10 @@ async function loadField() {
   if (bundledWells) state.wells = bundledWells;
   else if (az) fetchWells(lat, lon, signal).then((w) => { state.wells = w; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.wells = []; renderField(); } });
   else state.wells = [];
+  state.forecast = null; state.alerts = null;
+  fetchForecast(lat, lon, signal).then((f) => { state.forecast = f; renderSaved(); renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.forecast = { error: true }; renderSaved(); } });
+  if (lat > 18 && lat < 72 && lon < -60) fetchAlerts(lat, lon, signal).then((a) => { state.alerts = a; renderSaved(); renderField(); }).catch(() => { state.alerts = []; });
+  else state.alerts = [];
   try {
     state.weather = demoWeather(demo, id) || await fetchPower(lat, lon, signal);
     recompute();
@@ -133,7 +152,7 @@ async function loadField() {
 }
 
 // ---------- shell ----------
-const NAV = [['field', 'navField'], ['plans', 'navPlans'], ['build', 'navBuild'], ['learn', 'navLearn']];
+const NAV = [['field', 'navField'], ['plans', 'navPlans'], ['build', 'navBuild'], ['saved', 'navSaved'], ['learn', 'navLearn']];
 function renderShell() {
   const nav = NAV.map(([id, k]) => `<button data-go="${id}" ${state.screen === id ? 'aria-current="page"' : ''}>${icon(id)}<span>${t(k)}</span></button>`).join('');
   $('#railNav').innerHTML = nav;
@@ -158,6 +177,7 @@ function renderAll() {
   renderPlans();
   renderBuild();
   renderLearn();
+  renderSaved();
   renderLayers();
 }
 
@@ -192,9 +212,15 @@ function renderField() {
       <div><b>${t('seeBest')}</b><span>${esc(seqText(best))}</span></div>
       <span class="arrow">${icon('arrow')}</span></button>` : '';
 
-  el.innerHTML = `<div class="hero-title"><h1>${esc(placeName())}</h1>${badge}</div>
-    ${tiles}${cta}<div class="field-cards">${basic}${satCard()}${waterRulesCard()}${heatCard()}${monsoonCard()}${recentCard()}${soilCard()}${greenCard()}</div>`;
+  const quick = `<div class="quick-set">
+      <button class="btn small" data-edit="1">${icon('pin', 16)}${t('qLoc')}</button>
+      <button class="btn small" data-edit="2">${icon('build', 16)}${t('qCrops')}</button>
+      <button class="btn small" data-edit="3">${icon('drop', 16)}${t('qWater')}</button></div>`;
+  el.innerHTML = `<div class="hero-title"><h1>${esc(placeName())}</h1>${badge}</div>${quick}
+    ${alertBanner()}${tiles}${cta}<div class="field-cards">${basic}${satCard()}${waterRulesCard()}${heatCard()}${monsoonCard()}${recentCard()}${soilCard()}${greenCard()}</div>`;
 }
+
+function wm(k) { return `<details class="wm"><summary>${t('wmTitle')}</summary><p>${t(k)}</p></details>`; }
 
 function recentCard() {
   const r = state.recent;
@@ -202,7 +228,7 @@ function recentCard() {
   const ratio = r.rainIn / (r.normalRainIn || 0.01);
   const tag = ratio > 1.25 ? t('wetter') : ratio < 0.75 ? t('drier') : t('aboutNormal');
   return `<div class="card"><div class="card-h"><h3>${t('thisSeason')}</h3><span class="pill">${tag}</span></div>
-    <div class="stack" style="gap:6px"><span>${t('seasonLine', { rain: r.rainIn.toFixed(1), normal: r.normalRainIn.toFixed(1) })}</span><span class="muted">${t('seasonHot', { hot: r.hot, normal: Math.round(r.normalHot) })}</span></div></div>`;
+    <div class="stack" style="gap:6px"><span>${t('seasonLine', { rain: r.rainIn.toFixed(1), normal: r.normalRainIn.toFixed(1) })}</span><span class="muted">${t('seasonHot', { hot: r.hot, normal: Math.round(r.normalHot) })}</span></div>${wm('wm_recent')}</div>`;
 }
 
 function soilCard() {
@@ -212,7 +238,7 @@ function soilCard() {
   return `<div class="card"><div class="card-h"><h3>${t('soil')}</h3></div>
     <h2>${esc(t(s.texture === 'sand' ? 'sand_t' : s.texture === 'clay' ? 'clay_t' : s.texture))}</h2>
     <div class="bar3"><i style="flex:${s.sand};background:#d9c38a"></i><i style="flex:${s.silt};background:#a5a08d"></i><i style="flex:${s.clay};background:#7d6a55"></i></div>
-    <span class="muted small">${t('sand')} ${Math.round(s.sand)}% · ${t('silt')} ${Math.round(s.silt)}% · ${t('clay')} ${Math.round(s.clay)}%${s.soc != null ? ` · ${(s.soc / 10).toFixed(1)}% ${t('organic')}` : ''}</span></div>`;
+    <span class="muted small">${t('sand')} ${Math.round(s.sand)}% · ${t('silt')} ${Math.round(s.silt)}% · ${t('clay')} ${Math.round(s.clay)}%${s.soc != null ? ` · ${(s.soc / 10).toFixed(1)}% ${t('organic')}` : ''}</span>${wm('wm_soil')}</div>`;
 }
 
 function greenCard() {
@@ -221,7 +247,7 @@ function greenCard() {
   if (n.error || n.length < 6) return '';
   const pts = n.slice(-69).map(([date, ndvi]) => ({ date, ndvi }));
   return `<div class="card"><div class="card-h"><h3>${t('greenTitle')}</h3></div>
-    ${sparkline(pts)}<span class="muted small">${t('greenLine', { bare: pts.filter((x) => x.ndvi < 0.2).length, n: pts.length })}</span></div>`;
+    ${sparkline(pts)}<span class="muted small">${t('greenLine', { bare: pts.filter((x) => x.ndvi < 0.2).length, n: pts.length })}</span>${wm('wm_green')}</div>`;
 }
 
 function satCheck() {
@@ -240,7 +266,7 @@ function satCard() {
     if (c.greenButSaid.length) lines.push(t('satGreen', { months: months(c.greenButSaid) }));
     body = `<p>${lines.join(' ')} <b>${t('satAsk')}</b></p><div class="btn-row" style="margin-top:12px"><button class="btn small" data-act="fix-now">${t('satFix')}</button></div>`;
   }
-  return `<div class="card ${c.agrees ? '' : 'attention'}"><div class="card-h"><h3>${icon('sat', 18)} ${t('satTitle')}</h3></div>${body}</div>`;
+  return `<div class="card ${c.agrees ? '' : 'attention'}"><div class="card-h"><h3>${icon('sat', 18)} ${t('satTitle')}</h3></div>${body}${wm('wm_sat')}</div>`;
 }
 
 function waterRulesCard() {
@@ -257,7 +283,7 @@ function waterRulesCard() {
     const dir = ft < 2 ? t('wellsFlat') : tr.perDecadeFt > 0 ? t('wellsDown', { ft: Math.round(ft) }) : t('wellsUp', { ft: Math.round(ft) });
     wells = `<div class="sub-block"><b>${t('wellsLine', { depth: Math.round(tr.latestDepthFt) })} ${dir}.</b>${depthLine(wellSeries(state.wells))}<span class="muted small">${t('wellsN', { n: tr.wells })}</span></div>`;
   }
-  return `<div class="card"><div class="card-h"><h3>${icon('well', 18)} ${t('azWaterTitle')}</h3></div><h2>${esc(title)}</h2><p style="margin-top:6px">${what}</p>${story}${wells}</div>`;
+  return `<div class="card"><div class="card-h"><h3>${icon('well', 18)} ${t('azWaterTitle')}</h3></div><h2>${esc(title)}</h2><p style="margin-top:6px">${what}</p>${story}${wells}${wm('wm_wells')}</div>`;
 }
 
 function heatCard() {
@@ -267,7 +293,7 @@ function heatCard() {
   const up = h.late - h.early >= 2;
   const line = up ? t('heatLine', { late: Math.round(h.late), early: Math.round(h.early) }) : t('heatLineFlat', { late: Math.round(h.late) });
   const cot = cl.cottonHeat && isAz() ? `<p class="muted" style="margin-top:8px">${t('cottonHeat', { n: Math.round(cl.cottonHeat.avgL1) })}</p>` : '';
-  return `<div class="card"><div class="card-h"><h3>${icon('sun', 18)} ${t('heatTitle')}</h3></div><p>${line}</p>${yearBars(h.byYear)}${cot}</div>`;
+  return `<div class="card"><div class="card-h"><h3>${icon('sun', 18)} ${t('heatTitle')}</h3></div><p>${line}</p>${yearBars(h.byYear)}${cot}${wm('wm_heat')}</div>`;
 }
 
 function monsoonCard() {
@@ -275,7 +301,7 @@ function monsoonCard() {
   if (!m || !isAz()) return '';
   return `<div class="card"><div class="card-h"><h3>${icon('cloud', 18)} ${t('monTitle')}</h3></div>
     <p>${t('monLine', { in: m.avgIn.toFixed(1), n: m.yearsWithHeavy, t: m.byYear.length })}</p>
-    <p class="muted small" style="margin-top:6px">${t('monTip')}</p></div>`;
+    <p class="muted small" style="margin-top:6px">${t('monTip')}</p>${wm('wm_monsoon')}</div>`;
 }
 
 function titleCase(s) { return s.toLowerCase().replace(/\b(\w)/g, (c) => c.toUpperCase()).replace(/\bAma\b/, 'AMA').replace(/\bIna\b/, 'INA'); }
@@ -300,14 +326,26 @@ function headline(r, base) {
   let big, line;
   if (r === base || Math.abs(d) < 0.05) { big = t('usesGal', { gal: gal(r.netAcft) }); line = t('usesLine'); }
   else {
-    big = d < 0 ? t('savesGal', { gal: gal(-d) }) : t('moreGal', { gal: gal(d) });
+    big = d < 0 ? t('savesOf', { gal: gal(-d), tot: gal(base.netAcft) }) : t('moreGal', { gal: gal(d) });
     // Range across the 20 replayed years: same plan, same field, real weather.
     const diffs = r.replay.map((y, i) => Math.abs(y.avgNet - base.replay[i].avgNet)).sort((x, z) => x - z);
     const q = (p) => diffs[Math.round((diffs.length - 1) * p)];
     const lo = gal(q(0.1)), hi = gal(q(0.9));
     line = lo === hi ? t('vsNow') : `${t('vsNow')}. ${t('galRange', { lo, hi })}`;
   }
-  return `<div class="headline"><b>${big}</b><span>${line}</span></div>`;
+  return `<div class="headline">${waterCircle(r, base)}<div><b>${big}</b><span>${line}</span></div></div>`;
+}
+
+// Big water dial: this plan's yearly water against what you grow now (and your supply).
+function waterCircle(r, base) {
+  const size = 112, rad = size / 2 - 9, c = 2 * Math.PI * rad;
+  const ref = Math.max(base.netAcft, r.netAcft, 0.01);
+  const share = r.netAcft / ref;
+  const pct = r === base ? 100 : Math.round(100 * r.netAcft / Math.max(base.netAcft, 0.01));
+  return `<div class="wcircle" title="${esc(t('wcTitle'))}"><svg viewBox="0 0 ${size} ${size}" aria-hidden="true">
+    <circle cx="${size / 2}" cy="${size / 2}" r="${rad}" class="wc-bg"/>
+    <circle cx="${size / 2}" cy="${size / 2}" r="${rad}" class="wc-fg" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${(c * (1 - share)).toFixed(1)}" transform="rotate(-90 ${size / 2} ${size / 2})"/></svg>
+    <div class="wc-in">${icon('drop', 18)}<b>${gal(r.netAcft)}</b><small>${r === base ? t('wcGalYr') : t('wcOfNow', { pct })}</small></div></div>`;
 }
 
 function moneyBlock(r) {
@@ -315,7 +353,7 @@ function moneyBlock(r) {
   if (!m) return '';
   return `<div class="money"><div class="money-main">${icon('coin', 20)}<b>${t('moneyAvg', { v: usd(m.cash) })}</b></div>
     <span>${t('moneyCash')} · ${t('moneyNet', { v: usd(m.mean) })}</span>
-    <span>${t('moneyRange', { lo: usd(m.cashLow), hi: usd(m.cashHigh) })}</span></div>`;
+    <span>${t('moneyRange', { lo: usd(m.cashLow), hi: usd(m.cashHigh) })}</span>${wm('wm_money')}</div>`;
 }
 
 function shortageCard(r) {
@@ -327,7 +365,7 @@ function shortageCard(r) {
     const cls = o.good >= n * 0.8 ? 'ok' : o.good >= n * 0.4 ? 'mid' : 'low';
     return `<div class="tier ${cls}${state.shortage === k ? ' on' : ''}"><small>${t(lab)}</small><b>${t('shGood', { n: o.good, t: n })}</b><span>${t('shMoney', { v: usd(o.cash) })}</span></div>`;
   }).join('');
-  return `<div class="card"><div class="card-h"><h3>${icon('drop', 18)} ${t('shortTitle')}</h3></div><div class="tiers">${cells}</div></div>`;
+  return `<div class="card"><div class="card-h"><h3>${icon('drop', 18)} ${t('shortTitle')}</h3></div><div class="tiers">${cells}</div>${wm('wm_short')}</div>`;
 }
 
 function heroCrop(r) {
@@ -350,11 +388,13 @@ function optionNames(list) {
     ['nameIncome', (o) => o.scores.income],
     ['nameSafe', (o) => o.scores.resilience],
   ];
-  const names = opts.map(() => null);
+  const names = opts.map((o) => (o.safest ? 'nameSafe' : null));
+  if (opts.some((o) => o.safest)) used.add('nameSafe');
   for (const [key, f] of picks) {
-    let best = -1, bv = -Infinity;
-    opts.forEach((o, i) => { if (!names[i] && f(o) > bv) { bv = f(o); best = i; } });
-    if (best >= 0 && !used.has(key)) { names[best] = key; used.add(key); }
+    if (used.has(key)) continue;
+    let best2 = -1, bv2 = -Infinity;
+    opts.forEach((o, i) => { if (!names[i] && f(o) > bv2) { bv2 = f(o); best2 = i; } });
+    if (best2 >= 0) { names[best2] = key; used.add(key); }
   }
   return [t('now'), ...names.map((k, i) => (k ? t(k) : t('option', { n: i + 1 })))];
 }
@@ -388,11 +428,12 @@ function renderPlans() {
           ${headline(r, base)}
           ${moneyBlock(r)}
         </div>
-        <div class="card">${rings(r.scores)}</div>
+        <div class="card">${rings(r.scores, r.detail)}</div>
         <div class="btn-row">
           <button class="btn primary" data-act="why">${icon('info', 20)}${t('whyBtn')}</button>
           <button class="btn" data-act="month">${icon('cal', 20)}${t('monthBtn')}</button>
           <button class="btn" data-act="edit-plan">${icon('build', 20)}${t('editBtn')}</button>
+          <button class="btn" data-act="save-plan">${icon('heart', 20)}${t('savePlan')}</button>
         </div>
       </div>
       <div class="stack">
@@ -497,22 +538,27 @@ function joinType(w, s) {
   return `${w}+${s}`;
 }
 
-function renderBuild() {
-  const el = $('#screen-build');
-  if (!state.res) { el.innerHTML = `<div class="screen-h"><h1>${t('buildTitle')}</h1></div><div class="skeleton" style="min-height:300px"></div>`; return; }
-  const years = state.build.map((id, y) => {
+// Three year cards with winter and summer slots. target: 'build' or 'baseline'.
+function yearCards(rot, target) {
+  return rot.map((id, y) => {
     const { w, s } = splitType(id);
     if (w === 'alfalfa') {
       return `<div class="card year-card"><div class="card-h" style="margin:0"><h3>${t('yearN', { n: y + 1 })}</h3></div>
-        <div class="slots"><button class="slot full" style="--c:${CROPS.alfalfa.color}" data-slot="${y}-w"><small>${t('allYear')}</small><b>${crop('alfalfa')}</b>${cropArt('alfalfa', 44, 'slot-art')}</button></div></div>`;
+        <div class="slots"><button class="slot full" style="--c:${CROPS.alfalfa.color}" data-slot="${target}-${y}-w"><small>${t('allYear')}</small><b>${crop('alfalfa')}</b>${cropArt('alfalfa', 44, 'slot-art')}</button></div></div>`;
     }
-    const slot = (season, c) => `<button class="slot${c === 'fallow' ? ' bare' : ''}" style="--c:${CROPS[c].color}" data-slot="${y}-${season}"><small>${t(season === 'w' ? 'winter' : 'summer')}</small><b>${esc(crop(c))}</b>${cropArt(c, 40, 'slot-art')}</button>`;
+    const slot = (season, c) => `<button class="slot${c === 'fallow' ? ' bare' : ''}" style="--c:${CROPS[c].color}" data-slot="${target}-${y}-${season}"><small>${t(season === 'w' ? 'winter' : 'summer')}</small><b>${esc(crop(c))}</b>${cropArt(c, 40, 'slot-art')}</button>`;
     return `<div class="card year-card"><div class="card-h" style="margin:0"><h3>${t('yearN', { n: y + 1 })}</h3></div><div class="slots">${slot('w', w)}${slot('s', s)}</div></div>`;
   }).join('');
+}
+
+function renderBuild() {
+  const el = $('#screen-build');
+  if (!state.res) { el.innerHTML = `<div class="screen-h"><h1>${t('buildTitle')}</h1></div><div class="skeleton" style="min-height:300px"></div>`; return; }
+  const years = yearCards(state.build, 'build');
   const dT = state.stress.dT, rp = state.stress.rainPct;
   el.innerHTML = `
     <div class="screen-h"><h1>${t('buildTitle')}</h1>
-      <div class="btn-row"><button class="btn small" data-act="from-opt">${t('startFrom')}</button><button class="btn small" data-act="set-now">${t('setNow')}</button></div></div>
+      <div class="btn-row"><label class="select"><span>${t('loadPlan')}</span><select id="fromPlan"><option value="">${t('choosePlan')}</option>${optionNames(planList()).map((n, k) => `<option value="${k}">${esc(n)}</option>`).join('')}</select></label><button class="btn small" data-act="set-now">${t('setNow')}</button><button class="btn small" data-act="save-plan" data-src="build">${icon('heart', 16)}${t('savePlan')}</button></div></div>
     <div class="build-grid">
       <div>${years}
         <div class="card" style="margin-top:10px"><div class="card-h"><h3>${t('whatIf')}</h3></div>
@@ -522,8 +568,7 @@ function renderBuild() {
             ${isAz() && (CAP_SHARE[state.source] ?? 0) > 0 ? `<div class="stack" style="gap:8px"><span class="lab">${t('canalSet')}</span><div class="seg" role="radiogroup">${[['none', 'shNone'], ['tier1', 'shTier1'], ['tier2', 'shTier2']].map(([k, l]) => `<button role="radio" aria-checked="${state.shortage === k}" data-short="${k}">${t(l)}</button>`).join('')}</div></div>` : ''}
             <label class="slider"><span class="lab">${t('priceSet')}<b>${t('priceUnit', { n: state.waterPrice })}</b></span><input type="range" min="0" max="400" step="5" value="${state.waterPrice}" data-price="1"></label>
           </div></div>
-        <div class="card"><div class="card-h"><h3>${t('leaveOut')}</h3></div>
-          <div class="chips out">${EXCLUDABLE.map((c) => `<button aria-pressed="${state.excluded.has(c)}" data-exclude="${c}">${esc(crop(c))}</button>`).join('')}</div></div>
+        <div class="card"><div class="card-h"><h3>${t('leaveOut')}</h3></div>${excludeChips()}</div>
       </div>
       <div id="buildResult"></div>
     </div>`;
@@ -542,21 +587,25 @@ function renderBuildResult() {
       <h2>${t('yourPlan')}</h2>
       ${headline(r, base)}
     </div>
-    <div class="card">${rings(r.scores)}</div>
+    <div class="card">${rings(r.scores, r.detail)}</div>
     <div class="card"><div class="card-h"><h3>${t('fits', { n: fits, t: r.replay.length })}</h3></div>${replayStrip(r)}</div>
     <div class="card"><div class="card-h"><h3>${t('calendar')}</h3></div>${calendarStrip(r)}</div>
     <div class="btn-row"><button class="btn primary" data-act="why-build">${icon('info', 20)}${t('whyBtn')}</button><button class="btn" data-act="month-build">${icon('cal', 20)}${t('monthBtn')}</button></div>
   </div>`;
 }
 
-function slotPicker(y, season) {
-  const { w, s } = splitType(state.build[y]);
+function excludeChips() {
+  return `<p class="muted small" style="margin-bottom:10px">${t('leaveOutSub')}</p><div class="chips out">${EXCLUDABLE.map((c) => `<button aria-pressed="${state.excluded.has(c)}" data-exclude="${c}">${esc(crop(c))}</button>`).join('')}</div>`;
+}
+
+function slotPicker(target, y, season) {
+  const { w, s } = splitType(state[target][y]);
   const list = season === 'w' ? [...WINTER, 'alfalfa'] : [...SUMMER, 'cotton', 'alfalfa'];
   const current = season === 'w' ? w : s;
   const cards = list.map((c) => {
     const tags = [WATER_TAG[c] ? t(WATER_TAG[c]) : '', CROPS[c].legume ? t('legume') : '', CROPS[c].role === 'cover' ? t('notSold') : ''].filter(Boolean);
     const out = state.excluded.has(c);
-    return `<button class="pick" aria-pressed="${c === current}" data-pick="${y}-${season}-${c}" ${out ? 'disabled' : ''}>
+    return `<button class="pick" aria-pressed="${c === current}" data-pick="${target}-${y}-${season}-${c}" ${out && target === 'build' ? 'disabled' : ''}>
       <span class="pick-art" style="color:${c === 'fallow' ? 'var(--muted)' : CROPS[c].color}">${cropArt(c, 34)}</span>
       <span class="nm">${esc(crop(c))}</span>
       <span class="tags">${tags.map((x) => `<span>${x}</span>`).join('')}</span></button>`;
@@ -565,13 +614,14 @@ function slotPicker(y, season) {
     <p class="muted" style="margin-bottom:14px">${t('yearN', { n: y + 1 })} · ${t(season === 'w' ? 'winter' : 'summer')}</p><div class="picker">${cards}</div>`);
 }
 
-function pick(y, season, c) {
-  let { w, s } = splitType(state.build[y]);
+function pick(target, y, season, c) {
+  let { w, s } = splitType(state[target][y]);
   if (c === 'alfalfa') { w = s = 'alfalfa'; }
   else if (season === 'w') { if (w === 'alfalfa') s = 'fallow'; w = c; if (s === 'cotton' && !BEFORE_COTTON.includes(c)) s = 'fallow'; }
   else { if (s === 'alfalfa' || w === 'alfalfa') w = 'fallow'; s = c; if (c === 'cotton' && !BEFORE_COTTON.includes(w)) { w = 'fallow'; toast(getLang() === 'es' ? 'El algodón se siembra en abril: antes solo cabe una cobertura.' : 'Cotton goes in by April, so only a cover fits before it.'); } }
-  state.build[y] = joinType(w, s);
+  state[target][y] = joinType(w, s);
   closeSheet();
+  if (target === 'baseline') return renderSetup();
   renderBuild();
   scoreBuild();
 }
@@ -609,13 +659,16 @@ function renderLearn() {
     ['University of Arizona AZMET weather stations (API)', 'https://azmet.arizona.edu/'],
     ['FAO Irrigation and Drainage Paper 56 (Penman-Monteith)', 'https://www.fao.org/4/x0490e/x0490e06.htm'],
     ['University of Arizona, Cotton Heat Stress (AZ1448)', 'https://extension.arizona.edu/sites/extension.arizona.edu/files/pubs/az1448.pdf'],
+    ['FAO CROPWAT: effective rainfall, USDA Soil Conservation Service method', 'https://www.fao.org/land-water/databases-and-software/cropwat/en/'],
+    ['Open-Meteo 7-day forecast', 'https://open-meteo.com/'],
+    ['National Weather Service active alerts', 'https://www.weather.gov/documentation/services-web-api'],
   ];
   const all = [...nasa, ...Object.values(SOURCES).map((x) => [x.label, x.url]), ...Object.values(ECON_SOURCES).map((x) => [x.label, x.url]), ...SHORTAGE_SOURCES.map((x) => [x.label, x.url]), ...GW_SOURCES.map((x) => [x.label, x.url])];
   $('#screen-learn').innerHTML = `
     <div class="screen-h"><h1>${t('navLearn')}</h1></div>
     <div class="learn-grid">
       <div class="stack">
-        <div class="card">${scene('learn')}<div class="card-h"><h3>${t('howTitle')}</h3></div><ol class="steps">${[1, 2, 3, 4].map((n) => `<li><span>${t(`how${n}`)}</span></li>`).join('')}</ol></div>
+        <div class="card">${scene('learn')}<div class="card-h"><h3>${t('howTitle')}</h3><button class="btn small" data-act="tour">${icon('help', 16)}${t('tourBtn')}</button></div><ol class="steps">${[1, 2, 3, 4].map((n) => `<li><span>${t(`how${n}`)}</span></li>`).join('')}</ol></div>
         ${methodsCard()}
         <div class="card lime-card"><h3>${t('disclaimer')}</h3></div>
       </div>
@@ -632,7 +685,7 @@ function renderLanding() {
   const proofs = [['lP1n', 'lP1'], ['lP2n', 'lP2'], ['lP3n', 'lP3']];
   const lang = getLang() === 'en' ? '<b>EN</b> · ES' : 'EN · <b>ES</b>';
   $('#landing').innerHTML = `<div class="land">
-    <header class="land-top"><span class="brand"><img src="assets/icon.svg" alt="" width="34" height="34"><span>terra</span></span><button class="lang">${lang}</button></header>
+    <header class="land-top"><span class="brand"><img src="assets/icon.svg" alt="" width="34" height="34"><span>terra</span></span><div class="btn-row"><button class="btn small ghost" data-act="purpose">${t('purposeNav')}</button><button class="lang">${lang}</button></div></header>
     <section class="land-hero">
       <div class="land-copy">
         <span class="pill">${icon('globe', 16)}${t('lAny')}</span>
@@ -643,6 +696,9 @@ function renderLanding() {
       <div class="land-art">${heroPlanet(420)}<div class="land-badge"><b>Arizona</b><span>${t('badgeAz')}</span></div></div>
     </section>
     <section class="land-proofs">${proofs.map(([n, l]) => `<div><b>${t(n)}</b><span>${t(l)}</span></div>`).join('')}</section>
+    <section class="land-purpose" id="purpose"><span class="pill">${t('purposeNav')}</span><h2>${t('pHead')}</h2><p class="lead">${t('pBody')}</p>
+      <div class="purpose-grid">${[1, 2, 3].map((n) => `<div class="card"><b class="num">${t(`pN${n}`)}</b><p>${t(`pT${n}`)}</p><small class="muted">${t(`pS${n}`)}</small></div>`).join('')}</div>
+      <div class="card lime-card"><h3>${t('pPromise')}</h3><p style="margin-top:6px">${t('pPromiseBody')}</p></div></section>
     <section class="land-why"><h2>${t('lWhyTitle')}</h2><div class="why-grid">${why.map(([h, b, ic]) => `<div class="card"><span class="why-ic">${icon(ic, 24)}</span><h3>${t(h)}</h3><p class="muted">${t(b)}</p></div>`).join('')}</div></section>
     <section class="land-how"><h2>${t('lHowTitle')}</h2><ol class="steps">${[1, 2, 3, 4].map((n) => `<li><span>${t(`how${n}`)}</span></li>`).join('')}</ol>
       <button class="btn primary big" data-act="land-try">${t('lStart')}${icon('arrow', 20)}</button></section>
@@ -653,15 +709,15 @@ function showLanding() { renderLanding(); $('#landing').hidden = false; document
 function hideLanding() { $('#landing').hidden = true; document.body.style.overflow = ''; try { localStorage.setItem('terra-seen', '1'); } catch { /* fine */ } }
 
 // ---------- setup ----------
-let setupStep = 1;
-function openSetup(step = 1) {
-  setupStep = step;
+let setupStep = 1, setupSingle = false;
+function openSetup(step = 1, single = false) {
+  setupStep = step; setupSingle = single;
   $('#setup').hidden = false;
   renderSetup();
 }
 function renderSetup() {
   const s = setupStep;
-  const prog = `<div class="progress">${[1, 2, 3].map((n) => `<i class="${n <= s ? 'on' : ''}"></i>`).join('')}</div><span class="muted small">${t('step', { n: s })}</span>`;
+  const prog = setupSingle ? '' : `<div class="progress">${[1, 2, 3].map((n) => `<i class="${n <= s ? 'on' : ''}"></i>`).join('')}</div><span class="muted small">${t('step', { n: s })}</span>`;
   let body = '';
   if (s === 1) {
     body = `${scene('field')}<div class="stack" style="gap:6px"><h1>${t('s1Title')}</h1><p class="muted">${t('s1Sub')}</p></div>
@@ -672,19 +728,22 @@ function renderSetup() {
       ${state.farm.custom ? `<button class="choice" aria-pressed="true"><span><b>${t('custom')}</b><small>${state.farm.lat.toFixed(3)}, ${state.farm.lon.toFixed(3)}${inArizona(state.farm.lat, state.farm.lon) ? ' · Arizona' : ''}</small></span><span class="tick"></span></button>` : ''}</div>`;
   } else if (s === 2) {
     const cur = state.baseline.join();
-    body = `${scene('rotation')}<div class="stack" style="gap:6px"><h1>${t('s2Title')}</h1><p class="muted">${t('s2Sub')}</p></div>
-      <div class="choice-list">${PRESETS.map((p) => `<button class="choice" aria-pressed="${p.rot.join() === cur}" data-preset="${p.id}"><span class="choice-l"><span class="choice-art">${[...new Set(p.rot.flatMap((x) => x.split('+')))].filter((c) => c !== 'fallow').map((c) => cropArt(c, 26)).join('')}</span><b>${t(p.id)}</b></span><span class="tick"></span></button>`).join('')}</div>`;
+    body = `<div class="stack" style="gap:6px"><h1>${t('s2Title')}</h1><p class="muted">${t('s2Sub2')}</p></div>
+      <div class="stack" style="gap:8px"><span class="muted small">${t('quickFill')}</span><div class="chips">${PRESETS.map((p) => `<button aria-pressed="${p.rot.join() === cur}" data-preset="${p.id}">${t(p.id)}</button>`).join('')}</div></div>
+      <div class="setup-years">${yearCards(state.baseline, 'baseline')}</div>`;
   } else {
-    body = `${scene('water')}<h1>${t('s3Title')}</h1>
+    body = `${scene('water')}<h1>${t('s3Title2')}</h1>
       <label class="slider"><span class="lab">${t('water')}<b class="num" id="allotV">${t('waterUnit', { n: state.allotment.toFixed(1) })}</b></span>
         <input type="range" id="allot" min="1" max="7" step="0.1" value="${state.allotment}"><span class="muted small">${t('waterHint')}</span></label>
       <div class="stack" style="gap:8px"><span class="muted">${t('srcTitle')}</span><div class="seg" role="radiogroup">${['wells', 'mix', 'canal'].map((v) => `<button role="radio" aria-checked="${state.source === v}" data-src="${v}">${t(`src${v[0].toUpperCase()}${v.slice(1)}`)}</button>`).join('')}</div></div>
       <label class="slider"><span class="lab">${t('priceLabel')}<b id="priceV">${t('priceUnit', { n: state.waterPrice })}</b></span>
         <input type="range" id="priceIn" min="0" max="400" step="5" value="${state.waterPrice}"><span class="muted small">${t('priceHint')}</span></label>
       <div class="stack" style="gap:8px"><span class="muted">${t('irrigation')}</span><div class="seg" role="radiogroup">${['furrow', 'sprinkler', 'drip'].map((v) => `<button role="radio" aria-checked="${state.irrigation === v}" data-irr="${v}">${t(v)}</button>`).join('')}</div></div>
-      <div class="stack" style="gap:8px"><span class="muted">${t('goals')}</span><div class="chips">${GOALS.map((g) => `<button aria-pressed="${state.goals.has(g)}" data-goal="${g}">${t(GOAL_LABEL[g])}</button>`).join('')}</div></div>`;
+      <div class="stack" style="gap:8px"><span class="muted">${t('cantGrow')}</span>${excludeChips()}</div>`;
   }
-  const foot = `<div class="setup-foot">${s > 1 ? `<button class="btn" data-setup="back">${t('back')}</button>` : ''}<button class="btn primary" data-setup="next">${s < 3 ? t('next') : t('showOptions')}</button></div>`;
+  const foot = setupSingle
+    ? `<div class="setup-foot"><button class="btn" data-setup="cancel">${t('cancel')}</button><button class="btn primary" data-setup="done">${t('done')}</button></div>`
+    : `<div class="setup-foot">${s > 1 ? `<button class="btn" data-setup="back">${t('back')}</button>` : ''}<button class="btn primary" data-setup="next">${s < 3 ? t('next') : t('showOptions')}</button></div>`;
   $('#setup').innerHTML = `<div class="setup-in"><div class="stack" style="gap:8px">${prog}</div>${body}${foot}</div>`;
   const allot = $('#allot');
   if (allot) allot.addEventListener('input', () => { state.allotment = +allot.value; $('#allotV').textContent = t('waterUnit', { n: state.allotment.toFixed(1) }); });
@@ -700,7 +759,11 @@ function finishSetup() {
   if (marker) marker.setLngLat([state.farm.lon, state.farm.lat]);
   if (map) map.flyTo({ center: [state.farm.lon, state.farm.lat], zoom: 12.5, duration: 2500 });
   if (moved) loadField(); else recompute();
+  if (setupSingle) { renderField(); return; }
   go('plans');
+  let seen = false;
+  try { seen = !!localStorage.getItem('terra-tour'); } catch { /* fine */ }
+  if (!seen) setTimeout(() => tour(0), 900);
 }
 
 // ---------- map ----------
@@ -752,6 +815,155 @@ function setLayer(id) {
   renderLayers();
 }
 
+// ---------- score explanations ----------
+const CONF = { water: 'cWater', soil: 'cSoil', resilience: 'cSafe', income: 'cIncome' };
+function scoreSheet(key) {
+  const r = sheetScoreTarget();
+  if (!r) return;
+  const v = r.scores[key], d = r.detail || {};
+  const pct = (x) => Math.round(100 * x);
+  const base = state.res.baseline;
+  let how = '', long = '';
+  if (key === 'water') {
+    how = t('hWater', { p: pct(d.waterPct ?? 0), n: (d.plans || 0).toLocaleString(), need: r.grossAcft.toFixed(1), sup: r.supply.toFixed(1), share: pct(d.ratio) });
+    const saved10 = (base.netAcft - r.netAcft) * 10;
+    long = saved10 > 0.05 ? t('lWater', { gal: gal(saved10), ft: (saved10 / 1).toFixed(1) }) : t('lWaterSame');
+  } else if (key === 'soil') {
+    how = t('hSoil', { bare: r.bareMonths, leg: r.legumeSeasons, fam: r.families.length, wind: r.windyBare });
+    long = t('lSoil');
+  } else if (key === 'resilience') {
+    how = t('hSafe', { n: d.good, w: d.warn, t: d.years, short: pct(d.worst3 || 0) });
+    long = t('lSafe');
+  } else {
+    how = t('hIncome', { p: pct(d.incomePct ?? 0), v: usd(r.money.cash), lo: usd(r.money.cashLow), hi: usd(r.money.cashHigh) });
+    long = t('lIncome', { v: usd(r.money.cash * 10) });
+  }
+  const conf = key === 'water' ? (isAz() ? 'High' : 'Medium') : key === 'resilience' ? (r.replay.length >= 15 ? 'High' : 'Medium') : 'Medium';
+  openSheet(`<div class="sheet-h"><h2>${t({ water: 'rWater', soil: 'rSoil', resilience: 'rSafety', income: 'rIncome' }[key])}: ${v}/100</h2><button class="icon-btn" data-close aria-label="Close">${icon('close', 20)}</button></div>
+    <div class="stack">
+      <div><h3>${t('sWhat')}</h3><p>${t(`m_${key}`)}</p></div>
+      <div><h3>${t('sHow')}</h3><p>${how}</p></div>
+      <div><h3>${t('sLong')}</h3><p>${long}</p></div>
+      <div><h3>${t('sScale')}</h3><p class="muted">${t('scaleLine')}</p></div>
+      <div class="card note"><b>${t('confidence', { level: t(conf) })}</b><p class="muted small" style="margin-top:4px">${t(CONF[key] + (key === 'water' && !isAz() ? 'Out' : ''))}</p></div>
+    </div>`);
+}
+let scoreTarget = 'plan';
+document.addEventListener('pointerdown', (e) => { const b = e.target.closest('[data-score]'); if (b) scoreTarget = b.closest('#buildResult') ? 'build' : 'plan'; }, true);
+function sheetScoreTarget() {
+  if (scoreTarget === 'build') return state.buildResult;
+  const list = planList();
+  return list[Math.min(state.plan, list.length - 1)];
+}
+
+// ---------- tutorial ----------
+const TOUR = [['tour1', 'field'], ['tour2', 'plans'], ['tour3', 'plans'], ['tour4', 'build'], ['tour5', 'saved'], ['tour6', 'learn']];
+function tour(i) {
+  if (i < 0 || i >= TOUR.length) { closeSheet(); try { localStorage.setItem('terra-tour', '1'); } catch { /* fine */ } return; }
+  const [k, screen] = TOUR[i];
+  go(screen);
+  openSheet(`<div class="sheet-h"><h2>${t(`${k}t`)}</h2><button class="icon-btn" data-tour="99" aria-label="Close">${icon('close', 20)}</button></div>
+    <p>${t(k)}</p>
+    <div class="progress" style="margin:16px 0">${TOUR.map((_, n) => `<i class="${n <= i ? 'on' : ''}"></i>`).join('')}</div>
+    <div class="btn-row">${i > 0 ? `<button class="btn" data-tour="${i - 1}">${t('back')}</button>` : `<button class="btn" data-tour="99">${t('skip')}</button>`}
+      <button class="btn primary" data-tour="${i + 1}">${i < TOUR.length - 1 ? t('next') : t('done')}</button></div>`);
+}
+
+// ---------- saved plans + live weather dashboard ----------
+function doSave(r, fromBuild) {
+  if (!r) return;
+  const list = planList();
+  const name = fromBuild ? t('myPlan') : optionNames(list)[Math.min(state.plan, list.length - 1)];
+  const fits = r.replay.filter((y) => y.status === 'good').length;
+  savePlan({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name: `${name} · ${seqText(r).slice(0, 60)}`, rotation: r.rotation.slice(),
+    farm: { lat: state.farm.lat, lon: state.farm.lon, name: placeName() }, savedAt: new Date().toISOString(),
+    snap: { netAcft: r.netAcft, cash: r.money?.cash ?? 0, fits, years: r.replay.length, waterPrice: state.waterPrice, allotment: state.allotment } });
+  toast(state.account.user ? t('savedCloud') : t('savedLocal'));
+}
+
+// What is in the field this month for year 1 of a plan.
+function cropNow(rotation) {
+  const tp = TYPES.find((x) => x.id === rotation[0]);
+  const m = new Date().getMonth() + 1;
+  if (!tp) return 'fallow';
+  if (tp.id === 'alfalfa') return 'alfalfa';
+  const [w, s] = tp.parts.length === 2 ? tp.parts : [tp.parts[0], tp.parts[0]];
+  return [11, 12, 1, 2, 3, 4].includes(m) ? w : s;
+}
+
+// Turn the 7-day forecast into plain warnings and tips for the crop in the ground.
+function weatherNotes(forecast, c) {
+  if (!Array.isArray(forecast)) return [];
+  const out = [];
+  const week = forecast.reduce((a, d) => a + d.rain, 0);
+  const big = forecast.find((d) => d.rain >= 1);
+  const hot = forecast.filter((d) => d.tmax >= 110);
+  const cold = forecast.find((d) => d.tmin <= 32);
+  const bare = c === 'fallow';
+  if (big || week >= 2) out.push({ kind: 'flood', text: t(bare ? 'nFloodBare' : 'nFloodCrop', { in: (big ? big.rain : week).toFixed(1), day: dayName(big ? big.date : forecast[0].date), crop: crop(c) }) });
+  if (hot.length) out.push({ kind: 'heat', text: t(c === 'cotton' ? 'nHeatCotton' : bare ? 'nHeatBare' : 'nHeatCrop', { n: hot.length, max: Math.round(Math.max(...hot.map((d) => d.tmax))), crop: crop(c) }) });
+  if (cold && !bare) out.push({ kind: 'cold', text: t('nCold', { day: dayName(cold.date), min: Math.round(cold.tmin), crop: crop(c) }) });
+  if (!bare && week >= 0.4) {
+    const mm = week * 25.4;
+    const eff = mm <= 250 ? mm * (125 - 0.2 * mm) / 125 : 125 + 0.1 * mm;
+    out.push({ kind: 'save', text: t('nSkip', { in: week.toFixed(1), gal: Math.round(eff / 25.4 * 27154).toLocaleString() }) });
+  }
+  return out;
+}
+function dayName(iso) { return new Date(`${iso}T12:00`).toLocaleDateString(getLang() === 'es' ? 'es-MX' : 'en-US', { weekday: 'short' }); }
+
+function alertBanner() {
+  const a = (state.alerts || []).filter((x) => /flood|heat|storm|freeze|dust|wind|fire/i.test(x.event));
+  const notes = weatherNotes(state.forecast, cropNow(state.baseline)).filter((n) => n.kind !== 'save');
+  if (!a.length && !notes.length) return '';
+  const first = a[0] ? `<b>${esc(a[0].event)}</b> · ${t('nwsUntil', { t: new Date(a[0].ends).toLocaleString(getLang() === 'es' ? 'es-MX' : 'en-US', { weekday: 'short', hour: 'numeric' }) })}` : esc(notes[0].text);
+  return `<button class="alert-banner" data-go="saved">${icon('alert', 20)}<span>${first}</span>${icon('arrow', 18)}</button>`;
+}
+
+function forecastStrip(f) {
+  if (!Array.isArray(f)) return f?.error ? `<p class="muted">${t('fcFail')}</p>` : `<div class="skeleton" style="min-height:70px"></div>`;
+  return `<div class="fc">${f.map((d) => `<div class="fc-d${d.rain >= 1 ? ' wet' : ''}${d.tmax >= 110 ? ' hot' : ''}"><small>${dayName(d.date)}</small><b>${Math.round(d.tmax)}°</b><span>${Math.round(d.tmin)}°</span><em>${d.rain >= 0.05 ? `${d.rain.toFixed(2)} in` : '–'}</em></div>`).join('')}</div>`;
+}
+
+function renderSaved() {
+  const el = $('#screen-saved');
+  if (!el) return;
+  const a = state.account;
+  const acct = !accountsReady()
+    ? `<div class="card"><div class="card-h"><h3>${icon('user', 18)} ${t('acctTitle')}</h3></div><p class="muted">${t('acctLocal')}</p></div>`
+    : a.user
+      ? `<div class="card acct"><div class="card-h"><h3>${icon('user', 18)} ${esc(a.user.name || a.user.email || '')}</h3><button class="btn small" data-act="sign-out">${t('signOut')}</button></div><p class="muted small">${t('acctSynced')}</p></div>`
+      : `<div class="card acct"><div class="card-h"><h3>${icon('user', 18)} ${t('acctTitle')}</h3></div><p class="muted" style="margin-bottom:12px">${t('acctWhy')}</p><button class="btn primary" data-act="sign-in">${t('signIn')}</button></div>`;
+  const nws = (state.alerts || []).map((x) => `<div class="note-row nws">${icon('alert', 18)}<div><b>${esc(x.event)}</b><span class="muted small">${esc(x.headline || '')}</span></div></div>`).join('');
+  const nowNotes = weatherNotes(state.forecast, cropNow(state.baseline)).map((n) => `<div class="note-row ${n.kind}">${icon(n.kind === 'heat' ? 'sun' : n.kind === 'save' ? 'drop' : n.kind === 'cold' ? 'alert' : 'cloud', 18)}<span>${esc(n.text)}</span></div>`).join('');
+  const weather = `<div class="card"><div class="card-h"><h3>${icon('cloud', 18)} ${t('fcTitle')}</h3><span class="pill">${t('fcLive')}</span></div>${forecastStrip(state.forecast)}
+    <div class="stack" style="gap:8px;margin-top:12px">${nws}${nowNotes || (Array.isArray(state.forecast) ? `<p class="muted small">${t('fcCalm')}</p>` : '')}</div>
+    <p class="muted small" style="margin-top:10px">${t('fcSrc')}</p></div>`;
+  const list = farmPlans();
+  const others = a.plans.length - list.length;
+  const cards = list.map((p, i) => {
+    const r = state.savedScores?.[i];
+    const c = cropNow(p.rotation);
+    const notes = weatherNotes(state.forecast, c).filter((n) => n.kind !== 'save');
+    let body = `<div class="skeleton" style="min-height:40px"></div>`;
+    if (r) {
+      const fits = r.replay.filter((y) => y.status === 'good').length;
+      const dm = r.money.cash - p.snap.cash;
+      const change = Math.abs(dm) >= 5 ? `<span class="muted small">${t('sinceSaved', { v: (dm > 0 ? '+' : '') + usd(dm) })}</span>` : '';
+      body = `<div class="saved-stats"><div><b>${gal(r.netAcft)}</b><span>${t('galYr')}</span></div><div><b>${usd(r.money.cash)}</b><span>${t('perAcreYr')}</span></div><div><b>${fits}/${r.replay.length}</b><span>${t('yrsFit')}</span></div></div>${change}`;
+    }
+    return `<div class="card saved-card"><div class="card-h"><h3>${esc(p.name)}</h3><span class="muted small">${new Date(p.savedAt).toLocaleDateString()}</span></div>
+      ${body}
+      <div class="note-row"><span class="chip">${cropArt(c, 18)}${esc(crop(c))}</span><span class="muted small">${t('inFieldNow')}</span></div>
+      ${notes.map((n) => `<div class="note-row ${n.kind}">${icon(n.kind === 'heat' ? 'sun' : 'cloud', 18)}<span>${esc(n.text)}</span></div>`).join('')}
+      <div class="btn-row"><button class="btn small" data-openplan="${p.id}">${t('openBuild')}</button><button class="btn small" data-delplan="${p.id}">${t('remove')}</button></div></div>`;
+  }).join('');
+  el.innerHTML = `<div class="screen-h"><h1>${t('navSaved')}</h1></div>
+    <div class="learn-grid"><div class="stack">${weather}${acct}</div>
+    <div class="stack">${cards || `<div class="card"><h3>${t('noSaved')}</h3><p class="muted" style="margin-top:6px">${t('noSavedSub')}</p></div>`}
+    ${others > 0 ? `<p class="muted small">${t('otherFarms', { n: others })}</p>` : ''}</div></div>`;
+}
+
 // ---------- events ----------
 let toastTimer;
 function toast(msg) {
@@ -771,12 +983,17 @@ document.addEventListener('click', (e) => {
   if (d.plan !== undefined && b.getAttribute('role') === 'tab') { state.plan = +d.plan; return renderPlans(); }
   if (d.layer) return setLayer(d.layer);
   if (b.classList.contains('lang')) { setLang(getLang() === 'en' ? 'es' : 'en'); renderAll(); if (!$('#setup').hidden) renderSetup(); if (!$('#landing').hidden) renderLanding(); return; }
-  if (b.id === 'placeChip') return openSetup(1);
-  if (d.slot) { const [y, s] = d.slot.split('-'); return slotPicker(+y, s); }
-  if (d.pick) { const [y, s, c] = d.pick.split('-'); return pick(+y, s, c); }
+  if (b.id === 'placeChip') return openSetup(1, true);
+  if (d.edit) return openSetup(+d.edit, true);
+  if (d.score) return scoreSheet(d.score);
+  if (d.tour !== undefined) return tour(+d.tour);
+  if (d.slot) { const [tg, y, s] = d.slot.split('-'); return slotPicker(tg, +y, s); }
+  if (d.pick) { const [tg, y, s, c] = d.pick.split('-'); return pick(tg, +y, s, c); }
   if (d.short) { state.shortage = d.short; renderBuild(); return recompute(); }
   if (d.src) { state.source = d.src; return renderSetup(); }
-  if (d.exclude) { const c = d.exclude; state.excluded.has(c) ? state.excluded.delete(c) : state.excluded.add(c); b.setAttribute('aria-pressed', String(state.excluded.has(c))); persist(); return recompute(); }
+  if (d.exclude) { const c = d.exclude; state.excluded.has(c) ? state.excluded.delete(c) : state.excluded.add(c); b.setAttribute('aria-pressed', String(state.excluded.has(c))); persist(); if ($('#setup').hidden) recompute(); return; }
+  if (d.delplan) { removePlan(d.delplan); return; }
+  if (d.openplan) { const p = getPlans().find((x) => x.id === d.openplan); if (p) { state.build = p.rotation.slice(); renderBuild(); scoreBuild(); go('build'); } return; }
   // setup
   if (d.farm) { const f = FARMS.find((x) => x.id === d.farm); state.farm = { ...f }; return renderSetup(); }
   if (d.preset) { state.baseline = PRESETS.find((p) => p.id === d.preset).rot.slice(); return renderSetup(); }
@@ -784,6 +1001,8 @@ document.addEventListener('click', (e) => {
   if (d.goal) { state.goals.has(d.goal) ? state.goals.delete(d.goal) : state.goals.add(d.goal); return renderSetup(); }
   if (d.setup === 'back') { setupStep--; return renderSetup(); }
   if (d.setup === 'next') { if (setupStep < 3) { setupStep++; return renderSetup(); } return finishSetup(); }
+  if (d.setup === 'done') return finishSetup();
+  if (d.setup === 'cancel') { $('#setup').hidden = true; return; }
   // actions
   const list = planList();
   const cur = list[Math.min(state.plan, list.length - 1)];
@@ -800,15 +1019,25 @@ document.addEventListener('click', (e) => {
     case 'why-build': return state.buildResult && whySheet(state.buildResult);
     case 'month-build': return state.buildResult && monthSheet(state.buildResult);
     case 'edit-plan': state.build = cur.rotation.slice(); renderBuild(); scoreBuild(); return go('build');
-    case 'from-opt': state.build = state.res.options[0].rotation.slice(); renderBuild(); return scoreBuild();
+    case 'save-plan': return doSave(d.src === 'build' ? state.buildResult : cur, d.src === 'build');
+    case 'sign-in': return signIn().catch((e) => toast(e.message === 'no-accounts' ? t('noAccounts') : t('signInFail')));
+    case 'sign-out': return signOutNow();
+    case 'tour': return tour(0);
+    case 'purpose': return $('#purpose')?.scrollIntoView({ behavior: 'smooth' });
     case 'set-now': state.baseline = state.build.slice(); persist(); toast(t('savedNow')); return recompute();
     case 'ics': return sheetRot && downloadIcs(sheetRot);
     case 'print': return window.print();
-    case 'fix-now': return openSetup(2);
+    case 'fix-now': return openSetup(2, true);
     case 'land-try': state.farm = { ...FARMS[0] }; hideLanding(); return openSetup(1);
     case 'land-mine': hideLanding(); return openSetup(1);
     case 'home': return showLanding();
   }
+});
+
+document.addEventListener('change', (e) => {
+  if (e.target.id !== 'fromPlan' || e.target.value === '') return;
+  const r = planList()[+e.target.value];
+  if (r) { state.build = r.rotation.slice(); renderBuild(); scoreBuild(); toast(t('loaded')); }
 });
 
 document.addEventListener('input', (e) => {
@@ -835,6 +1064,9 @@ if (NAV.some(([id]) => id === h)) state.screen = h;
 renderAll();
 initMap();
 loadField();
+onAccount((a) => { state.account = a; scoreSaved(); });
+initAccount();
+setInterval(() => { if (document.visibilityState === 'visible' && state.weather) fetchForecast(state.farm.lat, state.farm.lon).then((f) => { state.forecast = f; renderSaved(); renderField(); }).catch(() => {}); }, 30 * 60 * 1000);
 let firstRun = true;
 try { firstRun = !localStorage.getItem('terra-setup'); } catch { /* fine */ }
 if (firstRun || location.hash === '#home') showLanding();
