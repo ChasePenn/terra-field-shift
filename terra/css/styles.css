@@ -52,7 +52,7 @@ main { padding: 26px 32px 60px; max-width: 1240px; width: 100%; }
 .card { background: var(--s1); border-radius: var(--r); padding: 20px; }
 .card + .card { margin-top: 14px; }
 .card-h { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-.card-h h3 { color: var(--muted); font-size: 14px; font-weight: 400; }
+.card-h h3 { color: var(--ink, #fff); font-size: 17px; font-weight: 600; }
 .lime-card { background: var(--lime); color: var(--lime-ink); }
 .lime-card .muted { color: rgba(16,18,12,.6); }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; background: var(--s2); font-size: 13px; }
@@ -448,3 +448,5 @@ button.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; f
   .fc { gap: 4px; }
   .tabbar button span { font-size: 11px; }
 }
+.top-actions { display: flex; gap: 8px; align-items: center; }
+.wc-in svg { width: 16px !important; height: 16px !important; }

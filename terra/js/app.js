@@ -196,7 +196,6 @@ function renderField() {
     return;
   }
   const az = isAz();
-  const badge = az ? `<span class="pill lime">${icon('sun', 16)}${t('badgeAz')}</span>` : `<span class="pill">${icon('globe', 16)}${t('badgeBasic')}</span>`;
   const basic = az ? '' : `<div class="card note">${t('basicNote')}</div>`;
   const cl = state.res?.climate;
   const tiles = cl ? `
@@ -216,8 +215,8 @@ function renderField() {
       <button class="btn small" data-edit="1">${icon('pin', 16)}${t('qLoc')}</button>
       <button class="btn small" data-edit="2">${icon('build', 16)}${t('qCrops')}</button>
       <button class="btn small" data-edit="3">${icon('drop', 16)}${t('qWater')}</button></div>`;
-  el.innerHTML = `<div class="hero-title"><h1>${esc(placeName())}</h1>${badge}</div>${quick}
-    ${alertBanner()}${tiles}${cta}<div class="field-cards">${basic}${satCard()}${waterRulesCard()}${heatCard()}${monsoonCard()}${recentCard()}${soilCard()}${greenCard()}</div>`;
+  el.innerHTML = `<div class="hero-title"><h1>${esc(placeName())}</h1></div>${quick}
+    ${alertBanner()}${cta}${tiles}<div class="field-cards">${basic}${satCard()}${waterRulesCard()}${heatCard()}${monsoonCard()}${recentCard()}${soilCard()}</div>`;
 }
 
 function wm(k) { return `<details class="wm"><summary>${t('wmTitle')}</summary><p>${t(k)}</p></details>`; }
@@ -266,7 +265,9 @@ function satCard() {
     if (c.greenButSaid.length) lines.push(t('satGreen', { months: months(c.greenButSaid) }));
     body = `<p>${lines.join(' ')} <b>${t('satAsk')}</b></p><div class="btn-row" style="margin-top:12px"><button class="btn small" data-act="fix-now">${t('satFix')}</button></div>`;
   }
-  return `<div class="card ${c.agrees ? '' : 'attention'}"><div class="card-h"><h3>${icon('sat', 18)} ${t('satTitle')}</h3></div>${body}${wm('wm_sat')}</div>`;
+  const pts = state.ndvi.slice(-69).map(([date, ndvi]) => ({ date, ndvi }));
+  const spark = `<div style="margin-top:14px">${sparkline(pts)}<span class="muted small">${t('greenLine', { bare: pts.filter((x) => x.ndvi < 0.2).length, n: pts.length })}</span></div>`;
+  return `<div class="card ${c.agrees ? '' : 'attention'}"><div class="card-h"><h3>${t('satTitle')}</h3></div>${body}${spark}${wm('wm_sat')}</div>`;
 }
 
 function waterRulesCard() {
@@ -283,7 +284,7 @@ function waterRulesCard() {
     const dir = ft < 2 ? t('wellsFlat') : tr.perDecadeFt > 0 ? t('wellsDown', { ft: Math.round(ft) }) : t('wellsUp', { ft: Math.round(ft) });
     wells = `<div class="sub-block"><b>${t('wellsLine', { depth: Math.round(tr.latestDepthFt) })} ${dir}.</b>${depthLine(wellSeries(state.wells))}<span class="muted small">${t('wellsN', { n: tr.wells })}</span></div>`;
   }
-  return `<div class="card"><div class="card-h"><h3>${icon('well', 18)} ${t('azWaterTitle')}</h3></div><h2>${esc(title)}</h2><p style="margin-top:6px">${what}</p>${story}${wells}${wm('wm_wells')}</div>`;
+  return `<div class="card"><div class="card-h"><h3>${t('azWaterTitle')}</h3></div><h2>${esc(title)}</h2><p style="margin-top:6px">${what}</p>${story}${wells}${wm('wm_wells')}</div>`;
 }
 
 function heatCard() {
@@ -293,13 +294,13 @@ function heatCard() {
   const up = h.late - h.early >= 2;
   const line = up ? t('heatLine', { late: Math.round(h.late), early: Math.round(h.early) }) : t('heatLineFlat', { late: Math.round(h.late) });
   const cot = cl.cottonHeat && isAz() ? `<p class="muted" style="margin-top:8px">${t('cottonHeat', { n: Math.round(cl.cottonHeat.avgL1) })}</p>` : '';
-  return `<div class="card"><div class="card-h"><h3>${icon('sun', 18)} ${t('heatTitle')}</h3></div><p>${line}</p>${yearBars(h.byYear)}${cot}${wm('wm_heat')}</div>`;
+  return `<div class="card"><div class="card-h"><h3>${t('heatTitle')}</h3></div><p>${line}</p>${yearBars(h.byYear)}${cot}${wm('wm_heat')}</div>`;
 }
 
 function monsoonCard() {
   const m = state.res?.climate?.monsoon;
   if (!m || !isAz()) return '';
-  return `<div class="card"><div class="card-h"><h3>${icon('cloud', 18)} ${t('monTitle')}</h3></div>
+  return `<div class="card"><div class="card-h"><h3>${t('monTitle')}</h3></div>
     <p>${t('monLine', { in: m.avgIn.toFixed(1), n: m.yearsWithHeavy, t: m.byYear.length })}</p>
     <p class="muted small" style="margin-top:6px">${t('monTip')}</p>${wm('wm_monsoon')}</div>`;
 }
@@ -365,7 +366,7 @@ function shortageCard(r) {
     const cls = o.good >= n * 0.8 ? 'ok' : o.good >= n * 0.4 ? 'mid' : 'low';
     return `<div class="tier ${cls}${state.shortage === k ? ' on' : ''}"><small>${t(lab)}</small><b>${t('shGood', { n: o.good, t: n })}</b><span>${t('shMoney', { v: usd(o.cash) })}</span></div>`;
   }).join('');
-  return `<div class="card"><div class="card-h"><h3>${icon('drop', 18)} ${t('shortTitle')}</h3></div><div class="tiers">${cells}</div>${wm('wm_short')}</div>`;
+  return `<div class="card"><div class="card-h"><h3>${t('shortTitle')}</h3></div><div class="tiers">${cells}</div>${wm('wm_short')}</div>`;
 }
 
 function heroCrop(r) {
@@ -688,7 +689,6 @@ function renderLanding() {
     <header class="land-top"><span class="brand"><img src="assets/icon.svg" alt="" width="34" height="34"><span>terra</span></span><div class="btn-row"><button class="btn small ghost" data-act="purpose">${t('purposeNav')}</button><button class="lang">${lang}</button></div></header>
     <section class="land-hero">
       <div class="land-copy">
-        <span class="pill">${icon('globe', 16)}${t('lAny')}</span>
         <h1>${t('lHead')}</h1>
         <p>${t('lSub')}</p>
         <div class="btn-row"><button class="btn primary big" data-act="land-try">${t('lTry')}${icon('arrow', 20)}</button><button class="btn big" data-act="land-mine">${icon('pin', 20)}${t('lMine')}</button></div>
@@ -696,7 +696,7 @@ function renderLanding() {
       <div class="land-art">${heroPlanet(420)}<div class="land-badge"><b>Arizona</b><span>${t('badgeAz')}</span></div></div>
     </section>
     <section class="land-proofs">${proofs.map(([n, l]) => `<div><b>${t(n)}</b><span>${t(l)}</span></div>`).join('')}</section>
-    <section class="land-purpose" id="purpose"><span class="pill">${t('purposeNav')}</span><h2>${t('pHead')}</h2><p class="lead">${t('pBody')}</p>
+    <section class="land-purpose" id="purpose"><h2>${t('pHead')}</h2><p class="lead">${t('pBody')}</p>
       <div class="purpose-grid">${[1, 2, 3].map((n) => `<div class="card"><b class="num">${t(`pN${n}`)}</b><p>${t(`pT${n}`)}</p><small class="muted">${t(`pS${n}`)}</small></div>`).join('')}</div>
       <div class="card lime-card"><h3>${t('pPromise')}</h3><p style="margin-top:6px">${t('pPromiseBody')}</p></div></section>
     <section class="land-why"><h2>${t('lWhyTitle')}</h2><div class="why-grid">${why.map(([h, b, ic]) => `<div class="card"><span class="why-ic">${icon(ic, 24)}</span><h3>${t(h)}</h3><p class="muted">${t(b)}</p></div>`).join('')}</div></section>
@@ -930,13 +930,13 @@ function renderSaved() {
   if (!el) return;
   const a = state.account;
   const acct = !accountsReady()
-    ? `<div class="card"><div class="card-h"><h3>${icon('user', 18)} ${t('acctTitle')}</h3></div><p class="muted">${t('acctLocal')}</p></div>`
+    ? `<div class="card"><div class="card-h"><h3>${t('acctTitle')}</h3></div><p class="muted">${t('acctLocal')}</p></div>`
     : a.user
-      ? `<div class="card acct"><div class="card-h"><h3>${icon('user', 18)} ${esc(a.user.name || a.user.email || '')}</h3><button class="btn small" data-act="sign-out">${t('signOut')}</button></div><p class="muted small">${t('acctSynced')}</p></div>`
-      : `<div class="card acct"><div class="card-h"><h3>${icon('user', 18)} ${t('acctTitle')}</h3></div><p class="muted" style="margin-bottom:12px">${t('acctWhy')}</p><button class="btn primary" data-act="sign-in">${t('signIn')}</button></div>`;
+      ? `<div class="card acct"><div class="card-h"><h3>${esc(a.user.name || a.user.email || '')}</h3><button class="btn small" data-act="sign-out">${t('signOut')}</button></div><p class="muted small">${t('acctSynced')}</p></div>`
+      : `<div class="card acct"><div class="card-h"><h3>${t('acctTitle')}</h3></div><p class="muted" style="margin-bottom:12px">${t('acctWhy')}</p><button class="btn primary" data-act="sign-in">${t('signIn')}</button></div>`;
   const nws = (state.alerts || []).map((x) => `<div class="note-row nws">${icon('alert', 18)}<div><b>${esc(x.event)}</b><span class="muted small">${esc(x.headline || '')}</span></div></div>`).join('');
   const nowNotes = weatherNotes(state.forecast, cropNow(state.baseline)).map((n) => `<div class="note-row ${n.kind}">${icon(n.kind === 'heat' ? 'sun' : n.kind === 'save' ? 'drop' : n.kind === 'cold' ? 'alert' : 'cloud', 18)}<span>${esc(n.text)}</span></div>`).join('');
-  const weather = `<div class="card"><div class="card-h"><h3>${icon('cloud', 18)} ${t('fcTitle')}</h3><span class="pill">${t('fcLive')}</span></div>${forecastStrip(state.forecast)}
+  const weather = `<div class="card"><div class="card-h"><h3>${t('fcTitle')}</h3><span class="pill">${t('fcLive')}</span></div>${forecastStrip(state.forecast)}
     <div class="stack" style="gap:8px;margin-top:12px">${nws}${nowNotes || (Array.isArray(state.forecast) ? `<p class="muted small">${t('fcCalm')}</p>` : '')}</div>
     <p class="muted small" style="margin-top:10px">${t('fcSrc')}</p></div>`;
   const list = farmPlans();
