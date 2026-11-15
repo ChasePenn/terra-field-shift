@@ -86,5 +86,53 @@ const P = {
   pin: '<path d="M12 21s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/>',
   print: '<path d="M7 9V3h10v6M7 17H4v-7h16v7h-3"/><rect x="7" y="14" width="10" height="7"/>',
   drop: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  cloud: '<path d="M7 17a4 4 0 0 1-.5-8A6 6 0 0 1 18 9a4 4 0 0 1 0 8z"/><path d="M9 20l-1 2m5-2-1 2m5-2-1 2"/>',
+  well: '<path d="M5 10h14M7 10V6l5-3 5 3v4M8 10v11m8-11v11M8 15h8"/>',
+  sat: '<rect x="9" y="9" width="6" height="6" rx="1" transform="rotate(45 12 12)"/><path d="M4 4l4 4m8 8 4 4M14 4l-2 2m-6 6-2 2"/>',
+  coin: '<circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .8-3 2s1.3 1.7 3 2 3 .8 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.5M12 6v2m0 8v2"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
+  home: '<path d="M4 11l8-7 8 7v9a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z"/>',
 };
 export const icon = (name, size = 22) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
+
+// Small bar chart by year, e.g. days over 110°F. series: [[year, value], ...]
+export function yearBars(series, { color = 'var(--amber)', h = 64 } = {}) {
+  if (!series?.length) return '';
+  const w = 300, gap = 3, bw = (w - gap * (series.length - 1)) / series.length;
+  const max = Math.max(1, ...series.map((s) => s[1]));
+  const bars = series.map(([y, v], i) => {
+    const bh = Math.max(2, (v / max) * (h - 4));
+    return `<rect x="${(i * (bw + gap)).toFixed(1)}" y="${(h - bh).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="${color}"><title>${y}: ${Math.round(v)}</title></rect>`;
+  }).join('');
+  return `<svg class="mini" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${bars}</svg>
+    <div class="rp-axis"><span>${series[0][0]}</span><span>${series[series.length - 1][0]}</span></div>`;
+}
+
+// Depth to water over time; deeper is drawn lower. series: [[year, ft], ...]
+export function depthLine(series) {
+  if (!series || series.length < 3) return '';
+  const w = 300, h = 70, pad = 4;
+  const ys = series.map((s) => s[1]);
+  const lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
+  const x0 = series[0][0], x1 = series[series.length - 1][0];
+  const pts = series.map(([x, v]) => `${(pad + ((x - x0) / (x1 - x0 || 1)) * (w - 2 * pad)).toFixed(1)},${(pad + ((v - lo) / span) * (h - 2 * pad)).toFixed(1)}`);
+  return `<svg class="mini" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline points="${pts.join(' ')}" fill="none" stroke="#7fb3c9" stroke-width="2.5" stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>
+    <div class="rp-axis"><span>${x0} · ${Math.round(series[0][1])} ft</span><span>${x1} · ${Math.round(series[series.length - 1][1])} ft</span></div>`;
+}
+
+// Paired bars: station value vs our value, one pair per station.
+export function pairBars(rows, labels) {
+  if (!rows?.length) return '';
+  const max = Math.max(...rows.flatMap((r) => [r.a, r.b])) * 1.05;
+  const items = rows.map((r) => `<div class="pb"><span class="pb-n">${esc(r.name)}</span>
+      <div class="pb-bars"><i style="width:${(100 * r.a / max).toFixed(1)}%" class="pb-a"></i><i style="width:${(100 * r.b / max).toFixed(1)}%" class="pb-b"></i></div>
+      <span class="pb-v">${Math.round(r.a)} · ${Math.round(r.b)}</span></div>`).join('');
+  return `<div class="pairbars">${items}</div><div class="legend-row"><span><i class="pb-a"></i>${esc(labels[0])}</span><span><i class="pb-b"></i>${esc(labels[1])}</span></div>`;
+}
+
+// Data flow: boxes and arrows.
+export function flowDiagram(steps) {
+  return `<div class="flow">${steps.map((s, i) => `<div class="flow-box${i === steps.length - 1 ? ' last' : ''}">${esc(s)}</div>${i < steps.length - 1 ? '<span class="flow-arrow" aria-hidden="true">→</span>' : ''}`).join('')}</div>`;
+}

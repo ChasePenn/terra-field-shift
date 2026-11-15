@@ -31,7 +31,7 @@ export function demoWeather(demo, id) {
     const d = new Date(t);
     dates.push(`${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`);
   }
-  return { lat: f.lat, lon: f.lon, dates, tmax: f.tmax, tmin: f.tmin, rain: f.rain, fetched: demo.fetched, bundled: true };
+  return { lat: f.lat, lon: f.lon, z: f.z, dates, tmax: f.tmax, tmin: f.tmin, rain: f.rain, dew: f.dew, u2: f.u2, rs: f.rs, fetched: demo.fetched, bundled: true };
 }
 
 function cacheGet(key) {
@@ -44,11 +44,11 @@ function cacheSet(key, value) {
 // NASA POWER daily point data (MERRA-2 temperature, satellite-corrected rain).
 export async function fetchPower(lat, lon, signal) {
   const la = lat.toFixed(2), lo = lon.toFixed(2);
-  const key = `terra-power-v1-${la}-${lo}`;
+  const key = `terra-power-v2-${la}-${lo}`;
   const cached = cacheGet(key);
   if (cached) return { ...cached, cached: true };
   const params = new URLSearchParams({
-    parameters: 'T2M_MAX,T2M_MIN,PRECTOTCORR,GWETROOT',
+    parameters: 'T2M_MAX,T2M_MIN,T2MDEW,WS2M,ALLSKY_SFC_SW_DWN,PRECTOTCORR',
     community: 'AG', latitude: la, longitude: lo,
     start: RECORD.start, end: RECORD.end, format: 'JSON',
   });
@@ -57,13 +57,13 @@ export async function fetchPower(lat, lon, signal) {
   const json = await res.json();
   const p = json.properties.parameter;
   const dates = Object.keys(p.T2M_MAX);
-  const clean = (v) => (v === -999 || v == null ? NaN : v);
-  const out = { lat: +la, lon: +lo, dates: [], tmax: [], tmin: [], rain: [], wet: [] };
+  const clean = (v) => (v === -999 || v == null ? null : Math.round(v * 100) / 100);
+  const out = { lat: +la, lon: +lo, z: Math.round(json.geometry?.coordinates?.[2] ?? 300), dates: [], tmax: [], tmin: [], rain: [], dew: [], u2: [], rs: [] };
   for (const d of dates) {
     const tx = clean(p.T2M_MAX[d]), tn = clean(p.T2M_MIN[d]), r = clean(p.PRECTOTCORR[d]);
-    if (Number.isNaN(tx) || Number.isNaN(tn) || Number.isNaN(r)) continue; // skip missing days
-    out.dates.push(d); out.tmax.push(tx); out.tmin.push(tn); out.rain.push(r);
-    out.wet.push(clean(p.GWETROOT[d]));
+    if (tx == null || tn == null || r == null) continue; // skip days missing the basics
+    out.dates.push(d); out.tmax.push(tx); out.tmin.push(tn); out.rain.push(Math.max(0, r));
+    out.dew.push(clean(p.T2MDEW[d])); out.u2.push(clean(p.WS2M[d])); out.rs.push(clean(p.ALLSKY_SFC_SW_DWN[d]));
   }
   out.fetched = new Date().toISOString().slice(0, 10);
   cacheSet(key, out);
@@ -189,4 +189,39 @@ export function textureClass(sand, clay) {
   if (sand >= 52) return 'sandyLoam';
   if (silt >= 50) return 'siltLoam';
   return 'loam';
+}
+
+// Other bundled files built by scripts/fetch-data.mjs (validation, AMA map).
+const bundles = {};
+export function loadBundle(name) {
+  bundles[name] ||= fetch(new URL(`../data/${name}.json`, import.meta.url)).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  return bundles[name];
+}
+
+// Depth to groundwater in wells within about 6 miles, from the USGS Water Data
+// API (it includes Arizona Department of Water Resources measurements).
+export async function fetchWells(lat, lon, signal) {
+  const key = `terra-wells-v1-${lat.toFixed(2)}-${lon.toFixed(2)}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+  const bbox = [lon - 0.11, lat - 0.09, lon + 0.11, lat + 0.09].map((v) => v.toFixed(3)).join(',');
+  const url = `https://api.waterdata.usgs.gov/ogcapi/v0/collections/field-measurements/items?f=json&bbox=${bbox}&parameter_code=72019&datetime=1995-01-01T00:00:00Z/..&limit=10000`;
+  const res = await fetch(url, { signal: withTimeout(signal, 30000) });
+  if (!res.ok) throw new Error(`USGS answered ${res.status}`);
+  const j = await res.json();
+  const by = new Map();
+  for (const f of j.features || []) {
+    const p = f.properties, v = parseFloat(p.value);
+    if (!Number.isFinite(v)) continue;
+    const w = by.get(p.monitoring_location_id) || { id: p.monitoring_location_id, years: new Map() };
+    const y = +String(p.time).slice(0, 4);
+    if (!w.years.has(y)) w.years.set(y, []);
+    w.years.get(y).push(v);
+    by.set(w.id, w);
+  }
+  const med = (a) => { const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const out = [...by.values()].map((w) => ({ id: w.id, series: [...w.years.keys()].sort().map((y) => [y, med(w.years.get(y))]) }))
+    .filter((w) => w.series.length >= 6 && w.series[w.series.length - 1][0] - w.series[0][0] >= 10);
+  cacheSet(key, out);
+  return out;
 }

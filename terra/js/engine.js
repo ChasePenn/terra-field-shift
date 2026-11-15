@@ -1,48 +1,39 @@
 // TERRA rotation engine. Pure functions, no DOM, so it runs in the browser
 // and in Node tests.
 //
-// Inputs: daily NASA POWER weather (max/min temperature, rain) for one point.
+// Inputs: daily NASA POWER weather for one point (temperature, dew point,
+// wind, sunlight, rain).
 // Method:
-//   1. Reference evapotranspiration (ET0) per day with the Hargreaves equation
-//      (FAO-56 eq. 52), using extraterrestrial radiation from latitude (eq. 21).
+//   1. Reference evapotranspiration (ET0) per day with FAO-56 Penman-Monteith,
+//      bias-corrected month by month against University of Arizona AZMET
+//      stations inside Arizona (see scripts/fetch-data.mjs). Days missing
+//      sunlight, humidity or wind use Hargreaves (FAO-56 eq. 52).
 //   2. Crop water use = Kc x ET0, with FAO-56 crop coefficient curves.
 //   3. Irrigation need = crop water use minus effective rain (75% of rain).
 //   4. Every rotation is replayed against each real crop year in the record.
 
 import { CROPS, WINTER, SUMMER, BEFORE_COTTON, CY_MONTHS, CALENDAR_AREA } from './crops.js';
+import { DAY_MS, dayOfYear, extraterrestrialRadiation, hargreavesET0, dailyET0, canopyTemp, HEAT_L1_C, HEAT_L2_C } from './et.js';
+import { yearNet, supplyAfter, SHORTAGE, WATER_PRICE_DEFAULT } from './economics.js';
+
+export { extraterrestrialRadiation, hargreavesET0 };
 
 export const MM_PER_ACFT = 304.8;
 export const GALLONS_PER_ACFT = 325851;
 export const EFFECTIVE_RAIN = 0.75;
 export const IRRIGATION_EFFICIENCY = { drip: 0.9, sprinkler: 0.8, furrow: 0.7 };
 
-const DAY_MS = 86400000;
+// Arizona, where the AZMET bias correction was fitted and checked.
+export function inArizona(lat, lon) { return lat >= 31.3 && lat <= 37.0 && lon >= -114.9 && lon <= -109.0; }
 
-// ---------- weather ----------
-
-function dayOfYear(y, m, d) {
-  return Math.round((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 0)) / DAY_MS);
-}
-
-// FAO-56 eq. 21, returned as mm/day of evaporation equivalent (x 0.408).
-export function extraterrestrialRadiation(latDeg, doy) {
-  const phi = (latDeg * Math.PI) / 180;
-  const dr = 1 + 0.033 * Math.cos((2 * Math.PI * doy) / 365);
-  const delta = 0.409 * Math.sin((2 * Math.PI * doy) / 365 - 1.39);
-  const ws = Math.acos(Math.max(-1, Math.min(1, -Math.tan(phi) * Math.tan(delta))));
-  const ra = ((24 * 60) / Math.PI) * 0.082 * dr *
-    (ws * Math.sin(phi) * Math.sin(delta) + Math.cos(phi) * Math.cos(delta) * Math.sin(ws));
-  return ra * 0.408;
-}
-
-export function hargreavesET0(tmax, tmin, raMm) {
-  const range = Math.max(0, tmax - tmin);
-  return Math.max(0, 0.0023 * raMm * ((tmax + tmin) / 2 + 17.8) * Math.sqrt(range));
-}
-
-// weather: { lat, dates: ['YYYYMMDD'...], tmax:[], tmin:[], rain:[] }
+// weather: { lat, lon, z, dates: ['YYYYMMDD'...], tmax, tmin, rain, dew?, u2?, rs? }
 // stress:  { dT: degrees C added to max and min, rainPct: -50..+50 }
-export function prepareWeather(weather, stress = { dT: 0, rainPct: 0 }) {
+// calib:   { monthlyFactor: [12], hgFactor } from data/validation.json
+export function prepareWeather(weather, stress = { dT: 0, rainPct: 0 }, calib = null) {
+  const az = calib && inArizona(weather.lat, weather.lon ?? 0);
+  const mf = az ? calib.monthlyFactor : null;
+  const hgF = az ? calib.hgFactor || 1 : 1;
+  let pmDays = 0;
   const n = weather.dates.length;
   const days = new Array(n);
   const index = new Map();
@@ -52,8 +43,12 @@ export function prepareWeather(weather, stress = { dT: 0, rainPct: 0 }) {
     const tmax = weather.tmax[i] + stress.dT;
     const tmin = weather.tmin[i] + stress.dT;
     const rain = Math.max(0, weather.rain[i] * (1 + stress.rainPct / 100));
-    const et0 = hargreavesET0(tmax, tmin, extraterrestrialRadiation(weather.lat, dayOfYear(y, m, d)));
-    days[i] = { y, m, d, tmax, tmin, rain, et0 };
+    const dew = weather.dew ? weather.dew[i] : null;
+    const day = { y, m, d, tmax, tmin, rain, dew, u2: weather.u2 ? weather.u2[i] : null, rs: weather.rs ? weather.rs[i] : null };
+    const r = dailyET0(day, weather.lat, weather.z, hgF);
+    day.et0 = r.method === 'pm' && mf ? r.et0 * mf[m - 1] : r.et0;
+    if (r.method === 'pm') pmDays++;
+    days[i] = day;
     index.set(s, i);
   }
   // Complete crop years: Nov 1 (y-1) to Oct 31 (y), with at most 5% missing days.
@@ -66,7 +61,7 @@ export function prepareWeather(weather, stress = { dT: 0, rainPct: 0 }) {
     }
     if (have >= 0.95 * 365) cropYears.push(cy);
   }
-  return { lat: weather.lat, days, index, cropYears };
+  return { lat: weather.lat, days, index, cropYears, pmShare: n ? pmDays / n : 0, calibrated: !!mf };
 }
 
 function keyOf(t) {
@@ -76,19 +71,30 @@ function keyOf(t) {
 
 function cyMonthIndex(m) { return (m + 1) % 12; } // Nov -> 0 ... Oct -> 11
 
-export function climate(prep) {
-  const out = { years: prep.cropYears.length, rainIn: 0, et0In: 0, hot110: 0, frost: 0, monthlyEt0: Array(12).fill(0), monthlyRain: Array(12).fill(0), monthlyTmax: Array(12).fill(0) };
+export function climate(prep, canopy = null) {
+  const out = { years: prep.cropYears.length, rainIn: 0, et0In: 0, hot110: 0, frost: 0, monthlyEt0: Array(12).fill(0), monthlyRain: Array(12).fill(0), monthlyTmax: Array(12).fill(0), pmShare: prep.pmShare, calibrated: prep.calibrated };
   if (!prep.cropYears.length) return out;
   const set = new Set(prep.cropYears);
   const counts = Array(12).fill(0);
+  // per crop year: 110°F days, cotton canopy heat stress days (Jul-Aug bloom),
+  // heavy monsoon rain days (1 inch or more, Jul-Sep)
+  const per = new Map(prep.cropYears.map((cy) => [cy, { hot: 0, l1: 0, l2: 0, heavy: 0, monsoonIn: 0, dewDays: 0 }]));
   for (const d of prep.days) {
     const cy = d.m >= 11 ? d.y + 1 : d.y;
     if (!set.has(cy)) continue;
     const k = cyMonthIndex(d.m);
+    const p = per.get(cy);
     out.rainIn += d.rain; out.et0In += d.et0;
     out.monthlyEt0[k] += d.et0; out.monthlyRain[k] += d.rain; out.monthlyTmax[k] += d.tmax; counts[k]++;
-    if (d.tmax >= 43.3) out.hot110++;
+    if (d.tmax >= 43.3) { out.hot110++; p.hot++; }
     if (d.tmin <= 0) out.frost++;
+    if (d.m >= 7 && d.m <= 9) { p.monsoonIn += d.rain / 25.4; if (d.rain >= 25.4) p.heavy++; }
+    if ((d.m === 7 || d.m === 8) && d.dew != null) {
+      const c = canopyTemp(d.tmax, d.tmin, d.dew, canopy || undefined);
+      p.dewDays++;
+      if (c > HEAT_L1_C) p.l1++;
+      if (c > HEAT_L2_C) p.l2++;
+    }
   }
   const n = prep.cropYears.length;
   out.rainIn = out.rainIn / n / 25.4;
@@ -97,7 +103,36 @@ export function climate(prep) {
   for (let k = 0; k < 12; k++) {
     out.monthlyEt0[k] /= n; out.monthlyRain[k] /= n; out.monthlyTmax[k] /= counts[k] || 1;
   }
+  const yrs = prep.cropYears;
+  const series = (f) => yrs.map((cy) => [cy, f(per.get(cy))]);
+  out.heat = {
+    byYear: series((p) => p.hot),
+    perDecade: theilSen(series((p) => p.hot)) * 10,
+    early: avg(yrs.filter((y) => y <= yrs[0] + 9).map((y) => per.get(y).hot)),
+    late: avg(yrs.filter((y) => y > yrs[yrs.length - 1] - 10).map((y) => per.get(y).hot)),
+  };
+  const haveCanopy = yrs.every((y) => per.get(y).dewDays > 50);
+  out.cottonHeat = haveCanopy ? {
+    byYear: series((p) => p.l1),
+    avgL1: avg(yrs.map((y) => per.get(y).l1)), avgL2: avg(yrs.map((y) => per.get(y).l2)),
+    perDecade: theilSen(series((p) => p.l1)) * 10,
+  } : null;
+  out.monsoon = {
+    byYear: series((p) => p.heavy),
+    yearsWithHeavy: yrs.filter((y) => per.get(y).heavy > 0).length,
+    avgIn: avg(yrs.map((y) => per.get(y).monsoonIn)),
+  };
   return out;
+}
+
+// Theil-Sen slope: median of all pairwise slopes. Robust to one odd year.
+export function theilSen(pts) {
+  const s = [];
+  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) if (pts[j][0] !== pts[i][0]) s.push((pts[j][1] - pts[i][1]) / (pts[j][0] - pts[i][0]));
+  if (!s.length) return 0;
+  s.sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
 // ---------- crops ----------
@@ -248,23 +283,43 @@ export function evaluate(rotation, ctx) {
   const seq = rotation.map((id) => types.find((t) => t.id === id));
   const years = prep.cropYears;
 
-  // Water and year replay
-  const replay = [];
-  let sumNet = 0, sumGross = 0;
-  for (const cy of years) {
-    const rows = seq.map((t) => table.get(t.id).get(cy));
-    const gross = rows.map((r) => r.grossAcft);
-    const hits = rows.flatMap((r) => r.hits);
-    const worst = Math.max(...gross);
-    let status = 'good';
-    if (worst > allotment * 1.15) status = 'bad';
-    else if (worst > allotment || hits.length) status = 'warn';
-    replay.push({ cy, status, worstGross: worst, avgGross: avg(gross), hits });
-    sumNet += avg(rows.map((r) => r.netAcft));
-    sumGross += avg(gross);
+  // Water, money and year replay at the farm's water supply after any shortage.
+  const supply = supplyAfter(allotment, ctx.capShare || 0, ctx.shortage || 'none');
+  const outcome = (sup) => {
+    const rep = [];
+    for (const cy of years) {
+      const rows = seq.map((t) => table.get(t.id).get(cy));
+      const gross = rows.map((r) => r.grossAcft);
+      const hits = rows.flatMap((r) => r.hits);
+      const worst = Math.max(...gross);
+      let status = 'good';
+      if (worst > sup * 1.15) status = 'bad';
+      else if (worst > sup || hits.length) status = 'warn';
+      // money: each rotation year gets the water it needs up to the supply
+      const money = seq.map((t, i) => {
+        const need = gross[i];
+        const applied = Math.min(need, sup);
+        const deficit = need > 0 ? 1 - applied / need : 0;
+        return yearNet(t.parts, applied, deficit, { waterPrice: ctx.waterPrice, prices: ctx.prices });
+      });
+      rep.push({ cy, status, worstGross: worst, avgGross: avg(gross), avgNet: avg(rows.map((r) => r.netAcft)), hits,
+        profit: avg(money.map((m) => m.net)), cash: avg(money.map((m) => m.cash)), revenue: avg(money.map((m) => m.revenue)), waterCost: avg(money.map((m) => m.water)) });
+    }
+    return rep;
+  };
+  const replay = outcome(supply);
+  const netAcft = avg(replay.map((r) => r.avgNet));
+  const grossAcft = avg(replay.map((r) => r.avgGross));
+  const profits = replay.map((r) => r.profit);
+  const cashes = replay.map((r) => r.cash);
+  const money = { mean: avg(profits), low: quantile(profits, 0.1), high: quantile(profits, 0.9), cash: avg(cashes), cashLow: quantile(cashes, 0.1), cashHigh: quantile(cashes, 0.9), waterCost: avg(replay.map((r) => r.waterCost)), revenue: avg(replay.map((r) => r.revenue)) };
+  // What each Colorado River shortage level would do to this plan.
+  const tiers = {};
+  if (ctx.lite) return { money };
+  for (const tier of Object.keys(SHORTAGE)) {
+    const rep = tier === (ctx.shortage || 'none') ? replay : outcome(supplyAfter(allotment, ctx.capShare || 0, tier));
+    tiers[tier] = { good: rep.filter((r) => r.status === 'good').length, profit: avg(rep.map((r) => r.profit)), cash: avg(rep.map((r) => r.cash)), supply: supplyAfter(allotment, ctx.capShare || 0, tier) };
   }
-  const netAcft = sumNet / years.length;
-  const grossAcft = sumGross / years.length;
 
   // Calendar: 36 cells
   const calendar = [];
@@ -305,12 +360,13 @@ export function evaluate(rotation, ctx) {
   soil -= 6 * sameCropRepeats;
   soil = clamp(soil);
 
-  const ratio = grossAcft / allotment;
+  const ratio = grossAcft / supply;
   // Using water you have is fine; going over your supply is not. Score falls
   // gently from 60% of your supply and steeply once a plan needs more than you have.
   const water = clamp(100 - 40 * Math.max(0, ratio - 0.6) - 80 * Math.max(0, ratio - 1));
   const resilience = clamp((100 * replay.reduce((a, r) => a + (r.status === 'good' ? 1 : r.status === 'warn' ? 0.5 : 0), 0)) / replay.length);
-  const income = clamp((100 * avg(seq.map((t) => Math.min(6, t.parts.reduce((a, c) => a + CROPS[c].income, 0))))) / 6);
+  // Income: where this plan's average profit sits among all plans checked.
+  const income = ctx.profitRank ? clamp(100 * rankOf(ctx.profitRank, money.mean)) : 50;
 
   const w = ctx.weights;
   const wsum = w.water + w.soil + w.resilience + w.income || 1;
@@ -318,7 +374,7 @@ export function evaluate(rotation, ctx) {
 
   return {
     rotation, seq, labels: seq.map((t) => t.label),
-    netAcft, grossAcft, replay, calendar, bareMonths, windyBare, legumeSeasons,
+    netAcft, grossAcft, supply, money, tiers, replay, calendar, bareMonths, windyBare, legumeSeasons,
     families: [...families], pestBreak, sameCropRepeats, alfalfaYears,
     scores: { water: Math.round(water), soil: Math.round(soil), resilience: Math.round(resilience), income: Math.round(income), total: Math.round(total * 10) / 10 },
     confidence: confidenceFor(seq, ctx),
@@ -422,11 +478,11 @@ export function monthPlan(r) {
 // ---------- context for fast re-scoring ----------
 
 export function createContext(weather, inputs) {
-  const prep = prepareWeather(weather, inputs.stress);
+  const prep = prepareWeather(weather, inputs.stress, inputs.calib);
   const types = yearTypes();
   const efficiency = IRRIGATION_EFFICIENCY[inputs.irrigation] || 0.8;
   const table = buildYearTable(prep, types, efficiency);
-  return { types, table, prep, allotment: inputs.allotment, weights: inputs.weights, inArea: inCalendarArea(weather.lat, weather.lon) };
+  return { types, table, prep, allotment: inputs.allotment, capShare: inputs.capShare || 0, shortage: inputs.shortage || 'none', waterPrice: inputs.waterPrice ?? WATER_PRICE_DEFAULT, prices: inputs.prices || {}, weights: inputs.weights, inArea: inCalendarArea(weather.lat, weather.lon), canopy: inputs.canopy || null };
 }
 
 export function scoreOne(ctx, rotation, baseline) {
@@ -439,15 +495,41 @@ export function scoreOne(ctx, rotation, baseline) {
 export function run(weather, inputs) {
   const ctx = createContext(weather, inputs);
   const excluded = new Set(inputs.excluded || []);
-  const all = enumerateRotations(ctx.types, excluded).map((rot) => evaluate(rot, ctx));
+  const rots = enumerateRotations(ctx.types, excluded);
+  // First pass finds every plan's profit, second pass scores income against them.
+  ctx.lite = true;
+  ctx.profitRank = rots.map((rot) => evaluate(rot, ctx).money.mean).sort((a, b) => a - b);
+  ctx.lite = false;
+  const all = rots.map((rot) => evaluate(rot, ctx));
   const baseline = evaluate(inputs.baseline, ctx);
   const options = rank(all, inputs.baseline, inputs.count || 3);
   for (const o of [baseline, ...options]) { o.explain = explain(o, baseline); o.plan = monthPlan(o); }
-  return { prep: ctx.prep, climate: climate(ctx.prep), baseline, options, all, ctx };
+  return { prep: ctx.prep, climate: climate(ctx.prep, ctx.canopy), baseline, options, all, ctx };
+}
+
+// Average seasonal crop water use (inches) for single-crop years, to compare
+// against published Arizona field measurements.
+export const SINGLE_YEAR = { alfalfa: 'alfalfa', cotton: 'fallow+cotton', wheat: 'wheat+fallow', barley: 'barley+fallow', sorghum: 'fallow+sorghum', guar: 'fallow+guar' };
+export function cropUse(ctx) {
+  const ys = ctx.prep.cropYears;
+  const out = {};
+  for (const [c, yt] of Object.entries(SINGLE_YEAR)) out[c] = ys.reduce((a, y) => a + ctx.table.get(yt).get(y).etcMm, 0) / (ys.length || 1) / 25.4;
+  return out;
 }
 
 // ---------- helpers ----------
 function avg(a) { return a.reduce((x, y) => x + y, 0) / (a.length || 1); }
+export function quantile(a, q) {
+  if (!a.length) return 0;
+  const s = [...a].sort((x, y) => x - y);
+  const pos = (s.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
+  return s[lo] + (s[hi] - s[lo]) * (pos - lo);
+}
+function rankOf(sorted, v) {
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] < v) lo = m + 1; else hi = m; }
+  return sorted.length > 1 ? lo / (sorted.length - 1) : 0.5;
+}
 function clamp(v) { return Math.max(0, Math.min(100, v)); }
 export function fmt(v) { return (Math.round(v * 10) / 10).toFixed(1); }
 export function galFmt(acft) {

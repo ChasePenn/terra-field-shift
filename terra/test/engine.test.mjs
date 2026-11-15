@@ -4,6 +4,9 @@
 import assert from 'node:assert/strict';
 import { run, yearTypes, enumerateRotations, occupiedMonths, hargreavesET0, extraterrestrialRadiation, MM_PER_ACFT } from '../js/engine.js';
 import { CROPS, REFERENCE_USE_IN } from '../js/crops.js';
+import { penmanMonteithET0, esat, canopyTemp } from '../js/et.js';
+import { yearNet, yieldFactor, supplyAfter, BUDGETS, grossRevenue } from '../js/economics.js';
+import { theilSen, quantile } from '../js/engine.js';
 
 const NORMALS_F = { // [Tmax, Tmin, rain inches/month]
   1: [67.6, 46.0, 0.91], 2: [71.0, 49.2, 0.92], 3: [77.5, 54.2, 0.99], 4: [85.4, 60.5, 0.28],
@@ -87,6 +90,46 @@ assert.ok(hot.baseline.netAcft > res.baseline.netAcft);
 const far = run(fixture(41.6, -93.6), inputs);
 assert.equal(far.baseline.confidence.level, 'Low');
 
+// 9a. Penman-Monteith reproduces FAO-56 Example 18 (Brussels, 6 July): 3.9 mm/day.
+{
+  const pm = penmanMonteithET0({ tmax: 21.5, tmin: 12.3, ea: 1.409, rs: 22.07, u2: 2.078, z: 100, lat: 50.8, doy: 187 });
+  assert.ok(Math.abs(pm - 3.9) < 0.1, `FAO-56 example 18 gives ${pm}`);
+  assert.ok(Math.abs(esat(20) - 2.338) < 0.005, 'saturation vapour pressure at 20C');
+}
+
+// 9b. Money: a full water supply means no yield loss; a 50% shortfall in cotton
+// cuts revenue by Ky x 0.5 = 42.5% (FAO-33).
+{
+  assert.equal(yieldFactor(0.85, 0), 1);
+  assert.ok(Math.abs(yieldFactor(0.85, 0.5) - 0.575) < 1e-9);
+  const full = yearNet(['fallow', 'cotton'], 5, 0, { waterPrice: 55 });
+  const short = yearNet(['fallow', 'cotton'], 2.5, 0.5, { waterPrice: 55 });
+  assert.ok(Math.abs(full.revenue - grossRevenue('cotton')) < 1e-6);
+  assert.ok(short.revenue < full.revenue && short.water < full.water);
+  // Every crop budget is complete
+  for (const [id, b] of Object.entries(BUDGETS)) for (const k of ['yield', 'price', 'variable', 'fixed', 'ky']) assert.ok(Number.isFinite(b[k]), `${id}.${k}`);
+  // Shortage: half the water from CAP, Tier 1 cuts 60% of it
+  assert.ok(Math.abs(supplyAfter(4, 0.5, 'tier1') - 2.8) < 1e-9);
+  assert.equal(supplyAfter(4, 0, 'tier2'), 4);
+}
+
+// 9c. Plans carry money ranges and shortage outcomes; a deeper cut never helps.
+for (const r of [res.baseline, ...res.options]) {
+  assert.ok(r.money.low <= r.money.mean + 1e-6 && r.money.mean <= r.money.high + 1e-6, 'money range ordered');
+  assert.ok(Number.isFinite(r.money.cash));
+}
+{
+  const cut = run(fixture(), { ...inputs, capShare: 1 });
+  const t = cut.baseline.tiers;
+  assert.ok(t.none.good >= t.tier1.good && t.tier1.good >= t.tier2.good, 'shortage tiers monotonic');
+  assert.ok(t.none.profit >= t.tier2.profit - 1e-6, 'less water never earns more');
+}
+
+// 9d. Trend and range helpers.
+assert.equal(theilSen([[0, 0], [1, 1], [2, 2], [3, 3], [4, 40]]), 1);
+assert.equal(quantile([1, 2, 3, 4, 5], 0.5), 3);
+assert.ok(canopyTemp(40, 25, 5) < 32.5, 'dry desert air keeps the canopy far cooler than the air');
+
 console.log('All engine tests passed. Rotations evaluated:', res.all.length);
 
 // 9. Real NASA POWER data (bundled demo farms) vs published Arizona water use.
@@ -98,8 +141,10 @@ if (!fs.existsSync(new URL('../data/demo.json', import.meta.url))) {
   const f = demo.farms.casa;
   const dates = []; let t = Date.UTC(+f.start.slice(0, 4), +f.start.slice(4, 6) - 1, +f.start.slice(6, 8));
   for (let i = 0; i < f.n; i++, t += 864e5) { const d = new Date(t); dates.push(`${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`); }
-  const real = run({ lat: f.lat, lon: f.lon, dates, tmax: f.tmax, tmin: f.tmin, rain: f.rain }, inputs);
-  console.log(`Real NASA POWER, Casa Grande: ET0 ${real.climate.et0In.toFixed(1)} in/yr, rain ${real.climate.rainIn.toFixed(1)} in/yr`);
+  const vUrl = new URL('../data/validation.json', import.meta.url);
+  const val = fs.existsSync(vUrl) ? JSON.parse(fs.readFileSync(vUrl)) : null;
+  const real = run({ lat: f.lat, lon: f.lon, z: f.z, dates, tmax: f.tmax, tmin: f.tmin, rain: f.rain, dew: f.dew, u2: f.u2, rs: f.rs }, { ...inputs, calib: val?.et0, canopy: val?.canopy });
+  console.log(`Real NASA POWER, Casa Grande: ET0 ${real.climate.et0In.toFixed(1)} in/yr (${Math.round(real.climate.pmShare * 100)}% Penman-Monteith days, ${real.prep.calibrated ? 'AZMET-calibrated' : 'not calibrated'}), rain ${real.climate.rainIn.toFixed(1)} in/yr`);
   for (const [crop, yt] of Object.entries(single)) {
     const ys = real.prep.cropYears;
     const avgIn = ys.reduce((a, y) => a + real.ctx.table.get(yt).get(y).etcMm, 0) / ys.length / 25.4;

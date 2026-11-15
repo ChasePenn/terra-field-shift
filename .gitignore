@@ -223,3 +223,5 @@ __marimo__/
 terra/data/demo.json
 terra/vendor/maplibre-gl.js
 terra/vendor/maplibre-gl.css
+terra/data/validation.json
+terra/data/ama.json

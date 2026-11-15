@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Terra · Crop rotations for a drier Arizona</title>
-  <meta name="description" content="Pick your field, see how each crop rotation would have done in the last 20 years of NASA weather, and build your own.">
+  <title>Terra · Crop plans for a hotter, drier world</title>
+  <meta name="description" content="Test thousands of crop rotations against 20 years of NASA data for any field. Fine-tuned for Arizona: water cuts, groundwater rules, heat and real crop budgets.">
   <meta name="theme-color" content="#0e0f0c">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
@@ -17,13 +17,13 @@
 <body>
   <div class="app">
     <aside class="rail">
-      <a class="brand" href="#field" aria-label="Terra"><img src="assets/icon.svg" alt="" width="36" height="36"></a>
+      <button class="brand" data-act="home" aria-label="Terra home"><img src="assets/icon.svg" alt="" width="36" height="36"></button>
       <nav class="rail-nav" id="railNav"></nav>
       <button class="lang" id="langRail" aria-label="Language"></button>
     </aside>
 
     <header class="topbar">
-      <a class="brand" href="#field"><img src="assets/icon.svg" alt="" width="30" height="30"><span>terra</span></a>
+      <button class="brand" data-act="home"><img src="assets/icon.svg" alt="" width="30" height="30"><span>terra</span></button>
       <div class="top-actions">
         <button class="lang" id="langTop" aria-label="Language"></button>
       </div>
@@ -57,6 +57,7 @@
   </div>
 
   <div class="setup" id="setup" hidden></div>
+  <div class="landing" id="landing" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="vendor/maplibre-gl.js"></script>

@@ -1,7 +1,10 @@
-import { CROPS, SOURCES, WINTER, SUMMER, BEFORE_COTTON } from './crops.js';
+import { CROPS, SOURCES, WINTER, SUMMER, BEFORE_COTTON, REFERENCE_USE_IN } from './crops.js';
 import { fmt, GALLONS_PER_ACFT } from './engine.js';
-import { fetchPower, fetchNdvi, fetchRecent, fetchSoil, loadDemo, demoWeather, textureClass, LAYERS } from './nasa.js';
-import { rings, calendarStrip, replayStrip, sparkline, icon } from './charts.js';
+import { fetchPower, fetchNdvi, fetchRecent, fetchSoil, fetchWells, loadDemo, loadBundle, demoWeather, textureClass, LAYERS } from './nasa.js';
+import { rings, calendarStrip, replayStrip, sparkline, icon, yearBars, depthLine, pairBars, flowDiagram } from './charts.js';
+import { inArizona, yearTypes } from './engine.js';
+import { findArea, AREA_FACTS, GW_SOURCES, wellTrend, wellSeries, satelliteCheck } from './local.js';
+import { ECON_SOURCES, SHORTAGE_SOURCES, WATER_PRICE_DEFAULT } from './economics.js';
 import { t, crop, month, getLang, setLang } from './i18n.js';
 import { cropArt, scene, heroPlanet } from './art.js';
 
@@ -9,6 +12,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+const TYPES = yearTypes();
+const CAP_SHARE = { wells: 0, mix: 0.5, canal: 0.9 };
 const FARMS = [
   { id: 'casa', lat: 32.88, lon: -111.77, name: 'Casa Grande', area: 'Pinal County' },
   { id: 'cool', lat: 32.985, lon: -111.52, name: 'Coolidge', area: 'Pinal County' },
@@ -33,6 +38,10 @@ const state = {
   baseline: saved.baseline || PRESETS[0].rot.slice(),
   allotment: saved.allotment ?? 4.1,
   irrigation: saved.irrigation || 'furrow',
+  source: saved.source || 'mix',
+  waterPrice: saved.waterPrice ?? WATER_PRICE_DEFAULT,
+  shortage: 'none',
+  wells: null, area: undefined, val: null, ama: null,
   goals: new Set(saved.goals || ['water', 'soil']),
   excluded: new Set(saved.excluded || []),
   stress: { dT: 0, rainPct: 0 },
@@ -43,7 +52,7 @@ const state = {
 function load() { try { return JSON.parse(localStorage.getItem('terra-farm') || '{}'); } catch { return {}; } }
 function persist() {
   try {
-    localStorage.setItem('terra-farm', JSON.stringify({ farm: state.farm, baseline: state.baseline, allotment: state.allotment, irrigation: state.irrigation, goals: [...state.goals], excluded: [...state.excluded] }));
+    localStorage.setItem('terra-farm', JSON.stringify({ farm: state.farm, baseline: state.baseline, allotment: state.allotment, irrigation: state.irrigation, source: state.source, waterPrice: state.waterPrice, goals: [...state.goals], excluded: [...state.excluded] }));
   } catch { /* fine */ }
 }
 const weights = () => {
@@ -76,7 +85,7 @@ function recompute() {
   clearTimeout(runTimer);
   runTimer = setTimeout(() => {
     runId++;
-    worker.postMessage({ id: runId, type: 'run', weather: state.weather, inputs: { baseline: state.baseline, allotment: state.allotment, irrigation: state.irrigation, excluded: [...state.excluded], weights: weights(), stress: state.stress } });
+    worker.postMessage({ id: runId, type: 'run', weather: state.weather, inputs: { baseline: state.baseline, allotment: state.allotment, irrigation: state.irrigation, excluded: [...state.excluded], weights: weights(), stress: state.stress, calib: state.val?.et0, canopy: state.val?.canopy, capShare: CAP_SHARE[state.source] ?? 0, shortage: state.shortage, waterPrice: state.waterPrice } });
   }, 160);
 }
 function scoreBuild() {
@@ -91,18 +100,26 @@ async function loadField() {
   ctl?.abort();
   ctl = new AbortController();
   const signal = ctl.signal;
-  Object.assign(state, { weather: null, res: null, ndvi: null, soil: null, recent: null, loadError: null, buildResult: null });
+  Object.assign(state, { weather: null, res: null, ndvi: null, soil: null, recent: null, wells: null, area: undefined, loadError: null, buildResult: null });
   renderAll();
   const { lat, lon } = state.farm;
-  const demo = state.farm.custom ? null : await loadDemo();
+  const [demo, val, ama] = await Promise.all([state.farm.custom ? null : loadDemo(), loadBundle('validation'), loadBundle('ama')]);
+  state.val = val; state.ama = ama;
+  const az = inArizona(lat, lon);
+  state.area = az && ama ? findArea(ama, lat, lon) : undefined;
   if (signal.aborted) return;
   const id = state.farm.id;
   const bundledSoil = demo?.soil?.[id];
   const bundledNdvi = demo?.ndvi?.[id];
   if (bundledSoil && bundledSoil.sand != null) state.soil = { ...bundledSoil, silt: bundledSoil.silt ?? 100 - bundledSoil.sand - bundledSoil.clay, texture: textureClass(bundledSoil.sand, bundledSoil.clay) };
   else fetchSoil(lat, lon, signal).then((s) => { state.soil = s; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.soil = { error: true }; renderField(); } });
-  if (bundledNdvi && bundledNdvi.length) state.ndvi = bundledNdvi;
-  else fetchNdvi(lat, lon, 3, signal).then((r) => { state.ndvi = r; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.ndvi = { error: true }; renderField(); } });
+  const toRows = (r) => r.map((x) => (Array.isArray(x) ? x : [x.date, x.ndvi]));
+  if (bundledNdvi && bundledNdvi.length) state.ndvi = toRows(bundledNdvi);
+  else fetchNdvi(lat, lon, 4, signal).then((r) => { state.ndvi = toRows(r); renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.ndvi = { error: true }; renderField(); } });
+  const bundledWells = demo?.wells?.[id];
+  if (bundledWells) state.wells = bundledWells;
+  else if (az) fetchWells(lat, lon, signal).then((w) => { state.wells = w; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.wells = []; renderField(); } });
+  else state.wells = [];
   try {
     state.weather = demoWeather(demo, id) || await fetchPower(lat, lon, signal);
     recompute();
@@ -147,6 +164,10 @@ function renderAll() {
 // ---------- field ----------
 function placeName() { return state.farm.custom ? t('custom') : `${state.farm.name}, ${state.farm.area}`; }
 
+function isAz() { return inArizona(state.farm.lat, state.farm.lon); }
+const usd = (v) => `${v < 0 ? '−' : ''}$${Math.abs(Math.round(v)).toLocaleString(getLang() === 'es' ? 'es-MX' : 'en-US')}`;
+const months = (list) => list.map((m) => month(m)).join(', ');
+
 function renderField() {
   $('#placeChip').innerHTML = `${icon('pin', 18)}<span>${esc(placeName())}</span>`;
   const el = $('#fieldSide');
@@ -154,6 +175,9 @@ function renderField() {
     el.innerHTML = `<div class="hero-title"><h1>${esc(placeName())}</h1></div><div class="err"><span>${t('loadFail')}</span><button class="btn small" data-act="retry">${t('retry')}</button></div>`;
     return;
   }
+  const az = isAz();
+  const badge = az ? `<span class="pill lime">${icon('sun', 16)}${t('badgeAz')}</span>` : `<span class="pill">${icon('globe', 16)}${t('badgeBasic')}</span>`;
+  const basic = az ? '' : `<div class="card note">${t('basicNote')}</div>`;
   const cl = state.res?.climate;
   const tiles = cl ? `
     <div class="tiles">
@@ -168,29 +192,93 @@ function renderField() {
       <div><b>${t('seeBest')}</b><span>${esc(seqText(best))}</span></div>
       <span class="arrow">${icon('arrow')}</span></button>` : '';
 
-  const r = state.recent;
-  const recent = !r ? '' : r.error ? '' : (() => {
-    const ratio = r.rainIn / (r.normalRainIn || 0.01);
-    const tag = ratio > 1.25 ? t('wetter') : ratio < 0.75 ? t('drier') : t('aboutNormal');
-    return `<div class="card"><div class="card-h"><h3>${t('thisSeason')}</h3><span class="pill">${tag}</span></div>
-      <div class="stack" style="gap:6px"><span>${t('seasonLine', { rain: r.rainIn.toFixed(1), normal: r.normalRainIn.toFixed(1) })}</span><span class="muted">${t('seasonHot', { hot: r.hot, normal: Math.round(r.normalHot) })}</span></div></div>`;
-  })();
-
-  const s = state.soil;
-  const soil = !s ? `<div class="card"><div class="card-h"><h3>${t('soil')}</h3></div><div class="skeleton" style="min-height:40px"></div></div>`
-    : s.error ? '' : `<div class="card"><div class="card-h"><h3>${t('soil')}</h3></div>
-      <h2>${esc(t(s.texture === 'sand' ? 'sand_t' : s.texture === 'clay' ? 'clay_t' : s.texture))}</h2>
-      <div class="bar3"><i style="flex:${s.sand};background:#d9c38a"></i><i style="flex:${s.silt};background:#a5a08d"></i><i style="flex:${s.clay};background:#7d6a55"></i></div>
-      <span class="muted small">${t('sand')} ${Math.round(s.sand)}% · ${t('silt')} ${Math.round(s.silt)}% · ${t('clay')} ${Math.round(s.clay)}%${s.soc != null ? ` · ${(s.soc / 10).toFixed(1)}% ${t('organic')}` : ''}</span></div>`;
-
-  const n = state.ndvi;
-  const green = !n ? `<div class="card"><div class="card-h"><h3>${t('greenTitle')}</h3></div><div class="skeleton" style="min-height:64px"></div></div>`
-    : n.error || n.length < 6 ? '' : `<div class="card"><div class="card-h"><h3>${t('greenTitle')}</h3></div>
-      ${sparkline(n)}<span class="muted small">${t('greenLine', { bare: n.filter((x) => x.ndvi < 0.2).length, n: n.length })}</span></div>`;
-
-  el.innerHTML = `<div class="hero-title"><h1>${esc(placeName())}</h1></div>
-    ${tiles}${cta}<div style="margin-top:14px">${recent}${soil}${green}</div>`;
+  el.innerHTML = `<div class="hero-title"><h1>${esc(placeName())}</h1>${badge}</div>
+    ${tiles}${cta}<div class="field-cards">${basic}${satCard()}${waterRulesCard()}${heatCard()}${monsoonCard()}${recentCard()}${soilCard()}${greenCard()}</div>`;
 }
+
+function recentCard() {
+  const r = state.recent;
+  if (!r || r.error) return '';
+  const ratio = r.rainIn / (r.normalRainIn || 0.01);
+  const tag = ratio > 1.25 ? t('wetter') : ratio < 0.75 ? t('drier') : t('aboutNormal');
+  return `<div class="card"><div class="card-h"><h3>${t('thisSeason')}</h3><span class="pill">${tag}</span></div>
+    <div class="stack" style="gap:6px"><span>${t('seasonLine', { rain: r.rainIn.toFixed(1), normal: r.normalRainIn.toFixed(1) })}</span><span class="muted">${t('seasonHot', { hot: r.hot, normal: Math.round(r.normalHot) })}</span></div></div>`;
+}
+
+function soilCard() {
+  const s = state.soil;
+  if (!s) return `<div class="card"><div class="card-h"><h3>${t('soil')}</h3></div><div class="skeleton" style="min-height:40px"></div></div>`;
+  if (s.error) return '';
+  return `<div class="card"><div class="card-h"><h3>${t('soil')}</h3></div>
+    <h2>${esc(t(s.texture === 'sand' ? 'sand_t' : s.texture === 'clay' ? 'clay_t' : s.texture))}</h2>
+    <div class="bar3"><i style="flex:${s.sand};background:#d9c38a"></i><i style="flex:${s.silt};background:#a5a08d"></i><i style="flex:${s.clay};background:#7d6a55"></i></div>
+    <span class="muted small">${t('sand')} ${Math.round(s.sand)}% · ${t('silt')} ${Math.round(s.silt)}% · ${t('clay')} ${Math.round(s.clay)}%${s.soc != null ? ` · ${(s.soc / 10).toFixed(1)}% ${t('organic')}` : ''}</span></div>`;
+}
+
+function greenCard() {
+  const n = state.ndvi;
+  if (!n) return `<div class="card"><div class="card-h"><h3>${t('greenTitle')}</h3></div><div class="skeleton" style="min-height:64px"></div></div>`;
+  if (n.error || n.length < 6) return '';
+  const pts = n.slice(-69).map(([date, ndvi]) => ({ date, ndvi }));
+  return `<div class="card"><div class="card-h"><h3>${t('greenTitle')}</h3></div>
+    ${sparkline(pts)}<span class="muted small">${t('greenLine', { bare: pts.filter((x) => x.ndvi < 0.2).length, n: pts.length })}</span></div>`;
+}
+
+function satCheck() {
+  if (!Array.isArray(state.ndvi)) return null;
+  return satelliteCheck(state.ndvi, state.baseline, TYPES);
+}
+
+function satCard() {
+  const c = satCheck();
+  if (!c) return '';
+  let body;
+  if (c.agrees) body = `<p>${t('satAgree', { y: c.years })}</p>`;
+  else {
+    const lines = [];
+    if (c.bareButSaid.length) lines.push(t('satBare', { months: months(c.bareButSaid) }));
+    if (c.greenButSaid.length) lines.push(t('satGreen', { months: months(c.greenButSaid) }));
+    body = `<p>${lines.join(' ')} <b>${t('satAsk')}</b></p><div class="btn-row" style="margin-top:12px"><button class="btn small" data-act="fix-now">${t('satFix')}</button></div>`;
+  }
+  return `<div class="card ${c.agrees ? '' : 'attention'}"><div class="card-h"><h3>${icon('sat', 18)} ${t('satTitle')}</h3></div>${body}</div>`;
+}
+
+function waterRulesCard() {
+  if (!isAz() || state.area === undefined) return '';
+  const name = state.area;
+  const f = name ? AREA_FACTS[name] : null;
+  const title = name ? t('amaIn', { name: titleCase(name) }) : t('amaNone');
+  const what = name ? t(`amaWhat_${f?.kind || 'ama'}`) : t('amaNoneWhat');
+  const story = f?.story ? `<p class="muted small" style="margin-top:6px">${t(`story_${f.story}`)}</p>` : '';
+  const tr = wellTrend(state.wells);
+  let wells = '';
+  if (tr) {
+    const ft = Math.abs(tr.perDecadeFt);
+    const dir = ft < 2 ? t('wellsFlat') : tr.perDecadeFt > 0 ? t('wellsDown', { ft: Math.round(ft) }) : t('wellsUp', { ft: Math.round(ft) });
+    wells = `<div class="sub-block"><b>${t('wellsLine', { depth: Math.round(tr.latestDepthFt) })} ${dir}.</b>${depthLine(wellSeries(state.wells))}<span class="muted small">${t('wellsN', { n: tr.wells })}</span></div>`;
+  }
+  return `<div class="card"><div class="card-h"><h3>${icon('well', 18)} ${t('azWaterTitle')}</h3></div><h2>${esc(title)}</h2><p style="margin-top:6px">${what}</p>${story}${wells}</div>`;
+}
+
+function heatCard() {
+  const cl = state.res?.climate;
+  if (!cl?.heat) return '';
+  const h = cl.heat;
+  const up = h.late - h.early >= 2;
+  const line = up ? t('heatLine', { late: Math.round(h.late), early: Math.round(h.early) }) : t('heatLineFlat', { late: Math.round(h.late) });
+  const cot = cl.cottonHeat && isAz() ? `<p class="muted" style="margin-top:8px">${t('cottonHeat', { n: Math.round(cl.cottonHeat.avgL1) })}</p>` : '';
+  return `<div class="card"><div class="card-h"><h3>${icon('sun', 18)} ${t('heatTitle')}</h3></div><p>${line}</p>${yearBars(h.byYear)}${cot}</div>`;
+}
+
+function monsoonCard() {
+  const m = state.res?.climate?.monsoon;
+  if (!m || !isAz()) return '';
+  return `<div class="card"><div class="card-h"><h3>${icon('cloud', 18)} ${t('monTitle')}</h3></div>
+    <p>${t('monLine', { in: m.avgIn.toFixed(1), n: m.yearsWithHeavy, t: m.byYear.length })}</p>
+    <p class="muted small" style="margin-top:6px">${t('monTip')}</p></div>`;
+}
+
+function titleCase(s) { return s.toLowerCase().replace(/\b(\w)/g, (c) => c.toUpperCase()).replace(/\bAma\b/, 'AMA').replace(/\bIna\b/, 'INA'); }
 
 function seqText(r) {
   return r.seq.map((tp) => tp.parts.filter((c) => c !== 'fallow').map(crop).join(' → ') || crop('fallow')).join('  ·  ');
@@ -209,11 +297,37 @@ function seqRows(r) {
 
 function headline(r, base) {
   const d = r.netAcft - base.netAcft;
-  let big;
-  if (r === base || Math.abs(d) < 0.05) big = t('usesGal', { gal: gal(r.netAcft) });
-  else if (d < 0) big = t('savesGal', { gal: gal(-d) });
-  else big = t('moreGal', { gal: gal(d) });
-  return `<div class="headline"><b>${big}</b><span>${t(big === t('usesGal', { gal: gal(r.netAcft) }) ? 'usesLine' : 'vsNow')}</span></div>`;
+  let big, line;
+  if (r === base || Math.abs(d) < 0.05) { big = t('usesGal', { gal: gal(r.netAcft) }); line = t('usesLine'); }
+  else {
+    big = d < 0 ? t('savesGal', { gal: gal(-d) }) : t('moreGal', { gal: gal(d) });
+    // Range across the 20 replayed years: same plan, same field, real weather.
+    const diffs = r.replay.map((y, i) => Math.abs(y.avgNet - base.replay[i].avgNet)).sort((x, z) => x - z);
+    const q = (p) => diffs[Math.round((diffs.length - 1) * p)];
+    const lo = gal(q(0.1)), hi = gal(q(0.9));
+    line = lo === hi ? t('vsNow') : `${t('vsNow')}. ${t('galRange', { lo, hi })}`;
+  }
+  return `<div class="headline"><b>${big}</b><span>${line}</span></div>`;
+}
+
+function moneyBlock(r) {
+  const m = r.money;
+  if (!m) return '';
+  return `<div class="money"><div class="money-main">${icon('coin', 20)}<b>${t('moneyAvg', { v: usd(m.cash) })}</b></div>
+    <span>${t('moneyCash')} · ${t('moneyNet', { v: usd(m.mean) })}</span>
+    <span>${t('moneyRange', { lo: usd(m.cashLow), hi: usd(m.cashHigh) })}</span></div>`;
+}
+
+function shortageCard(r) {
+  if (!r.tiers || !isAz()) return '';
+  const n = r.replay.length;
+  if ((CAP_SHARE[state.source] ?? 0) === 0) return `<div class="card"><div class="card-h"><h3>${t('shortTitle')}</h3></div><p class="muted">${t('shWells')}</p></div>`;
+  const cells = [['none', 'shNone'], ['tier1', 'shTier1'], ['tier2', 'shTier2']].map(([k, lab]) => {
+    const o = r.tiers[k];
+    const cls = o.good >= n * 0.8 ? 'ok' : o.good >= n * 0.4 ? 'mid' : 'low';
+    return `<div class="tier ${cls}${state.shortage === k ? ' on' : ''}"><small>${t(lab)}</small><b>${t('shGood', { n: o.good, t: n })}</b><span>${t('shMoney', { v: usd(o.cash) })}</span></div>`;
+  }).join('');
+  return `<div class="card"><div class="card-h"><h3>${icon('drop', 18)} ${t('shortTitle')}</h3></div><div class="tiers">${cells}</div></div>`;
 }
 
 function heroCrop(r) {
@@ -272,6 +386,7 @@ function renderPlans() {
           <h2>${esc(i === 0 ? t('nowTitle') : names[i])}</h2>
           ${seqRows(r)}
           ${headline(r, base)}
+          ${moneyBlock(r)}
         </div>
         <div class="card">${rings(r.scores)}</div>
         <div class="btn-row">
@@ -286,6 +401,7 @@ function renderPlans() {
           ${replayStrip(r)}
           <div class="rp-key" style="margin-top:10px"><span><i style="background:var(--lime)"></i>${t('fitsKey')}</span><span><i style="background:var(--amber)"></i>${t('tightKey')}</span><span><i style="background:var(--red)"></i>${t('overKey')}</span></div>
         </div>
+        ${shortageCard(r)}
       </div>
     </div>`;
 }
@@ -311,11 +427,21 @@ function whySheet(r) {
   const conf = r.confidence.reasons.map((x) => (x.k === 'conf_approx' ? t(x.k, { crops: x.crops.map((c) => crop(c).toLowerCase()).join(', ') }) : t(x.k)));
   const yrs = r.replay;
   openSheet(`<div class="sheet-h"><h2>${t('whyTitle')}</h2><button class="icon-btn" data-close aria-label="Close">${icon('close', 20)}</button></div>
-    <section><h4>${t('whatStands')}</h4><ul>${ex.why.map((x) => `<li>${esc(reasonText(x))}</li>`).join('')}</ul></section>
+    <section><h4>${t('whatStands')}</h4><ul>${ex.why.map((x) => `<li>${esc(reasonText(x))}</li>`).join('')}${extraWhy(r).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></section>
     <section><h4>${t('unknown')}</h4><ul>${ex.gaps.map((k) => `<li>${t(k)}</li>`).join('')}</ul></section>
     <section><h4>${t('askExpert')}</h4><ul>${ex.expert.map((k) => `<li>${t(k)}</li>`).join('')}</ul></section>
     <section><h4>${t('howSure', { level: t(r.confidence.level) })}</h4><ul>${conf.map((c) => `<li>${esc(c)}</li>`).join('')}</ul></section>
     <section><h4>${t('dataUsed')}</h4><ul><li>${t('data1', { from: yrs[0].cy, to: yrs[yrs.length - 1].cy })}</li><li>${t('data2')}</li><li>${t('data3')}</li></ul></section>`);
+}
+
+function extraWhy(r) {
+  const out = [];
+  if (r.money) out.push(t('whyMoney', { v: usd(r.money.cash), lo: usd(r.money.cashLow), w: usd(r.money.waterCost) }));
+  const cl = state.res?.climate;
+  if (cl?.cottonHeat && r.seq.some((tp) => tp.parts.includes('cotton'))) out.push(t('whyCottonHeat', { n: Math.round(cl.cottonHeat.avgL1) }));
+  const deficitYears = r.replay.filter((y) => y.worstGross > r.supply).length;
+  if (deficitYears) out.push(t('whyShort', { n: deficitYears, t: r.replay.length }));
+  return out;
 }
 
 function eventText(e) {
@@ -393,6 +519,8 @@ function renderBuild() {
           <div class="stack">
             <label class="slider"><span class="lab">${t('hotter')}<b>${dT ? `+${(dT * 1.8).toFixed(1)}°F` : t('noChange')}</b></span><input type="range" min="0" max="4" step="0.5" value="${dT}" data-stress="dT"></label>
             <label class="slider"><span class="lab">${t('rainChange')}<b>${rp ? `${rp > 0 ? '+' : ''}${rp}%` : t('noChange')}</b></span><input type="range" min="-40" max="20" step="5" value="${rp}" data-stress="rainPct"></label>
+            ${isAz() && (CAP_SHARE[state.source] ?? 0) > 0 ? `<div class="stack" style="gap:8px"><span class="lab">${t('canalSet')}</span><div class="seg" role="radiogroup">${[['none', 'shNone'], ['tier1', 'shTier1'], ['tier2', 'shTier2']].map(([k, l]) => `<button role="radio" aria-checked="${state.shortage === k}" data-short="${k}">${t(l)}</button>`).join('')}</div></div>` : ''}
+            <label class="slider"><span class="lab">${t('priceSet')}<b>${t('priceUnit', { n: state.waterPrice })}</b></span><input type="range" min="0" max="400" step="5" value="${state.waterPrice}" data-price="1"></label>
           </div></div>
         <div class="card"><div class="card-h"><h3>${t('leaveOut')}</h3></div>
           <div class="chips out">${EXCLUDABLE.map((c) => `<button aria-pressed="${state.excluded.has(c)}" data-exclude="${c}">${esc(crop(c))}</button>`).join('')}</div></div>
@@ -449,25 +577,79 @@ function pick(y, season, c) {
 }
 
 // ---------- learn ----------
+function methodsCard() {
+  const v = state.val;
+  const flow = flowDiagram([t('mFlowNasa'), t('mFlowModel'), t('mFlowCal'), t('mFlowPlans'), t('mFlowMoney')]);
+  let et = '';
+  if (v?.et0) {
+    const rows = v.stations.filter((x) => x.days > 300).map((x) => ({ name: x.name, a: x.stationIn, b: x.calIn }));
+    et = `<div class="sub-block"><h3>${t('mEtTitle')}</h3><p class="muted small">${t('mEtLine', { avg: v.et0.calibrated.meanAbsPct, max: v.et0.calibrated.maxAbsPct })} ${t('mEtRaw', { raw: v.et0.raw.meanAbsPct })}</p>
+      ${pairBars(rows, [`${t('mStation')} (in/yr)`, `${t('mOurs')} (in/yr)`])}${v.local ? `<p class="muted small">${t('mLocal')}</p>` : ''}</div>
+      <div class="sub-block"><p>${t('mCanopy', { rmse: (v.canopy.rmseC * 1.8).toFixed(1), n: v.canopy.n.toLocaleString() })}</p></div>`;
+  }
+  let use = '';
+  const cu = state.res?.cropUse;
+  if (cu) {
+    const rows = Object.entries(cu).map(([c, model]) => ({ name: crop(c), a: REFERENCE_USE_IN[c], b: model }));
+    use = `<div class="sub-block"><h3>${t('mUseTitle')}</h3>${pairBars(rows, [`${t('mPublished')} (in)`, `${t('mOurs')} (in)`])}</div>`;
+  }
+  return `<div class="card"><div class="card-h"><h3>${t('methodsTitle')}</h3></div>
+    <div class="sub-block"><h3>${t('mFlow')}</h3>${flow}</div>${et}${use}
+    <div class="sub-block"><p class="muted">${t('mMoney')}</p></div></div>`;
+}
+
 function renderLearn() {
   const terms = ['acft', 'et', 'ndvi', 'sm', 'gw', 'leg', 'cover', 'fallow', 'sat'];
   const nasa = [
-    ['NASA POWER', 'https://power.larc.nasa.gov/'],
+    ['NASA POWER (temperature, dew point, wind, sunlight, rain)', 'https://power.larc.nasa.gov/'],
     ['MODIS MOD13Q1 NDVI (ORNL DAAC)', 'https://modis.ornl.gov/data/modis_webservice.html'],
     ['NASA GIBS: MODIS NDVI, SMAP L4, GRACE/GRACE-FO', 'https://nasa-gibs.github.io/gibs-api-docs/'],
     ['ISRIC SoilGrids 2.0', 'https://soilgrids.org/'],
+    ['University of Arizona AZMET weather stations (API)', 'https://azmet.arizona.edu/'],
+    ['FAO Irrigation and Drainage Paper 56 (Penman-Monteith)', 'https://www.fao.org/4/x0490e/x0490e06.htm'],
+    ['University of Arizona, Cotton Heat Stress (AZ1448)', 'https://extension.arizona.edu/sites/extension.arizona.edu/files/pubs/az1448.pdf'],
   ];
+  const all = [...nasa, ...Object.values(SOURCES).map((x) => [x.label, x.url]), ...Object.values(ECON_SOURCES).map((x) => [x.label, x.url]), ...SHORTAGE_SOURCES.map((x) => [x.label, x.url]), ...GW_SOURCES.map((x) => [x.label, x.url])];
   $('#screen-learn').innerHTML = `
     <div class="screen-h"><h1>${t('navLearn')}</h1></div>
     <div class="learn-grid">
       <div class="stack">
         <div class="card">${scene('learn')}<div class="card-h"><h3>${t('howTitle')}</h3></div><ol class="steps">${[1, 2, 3, 4].map((n) => `<li><span>${t(`how${n}`)}</span></li>`).join('')}</ol></div>
+        ${methodsCard()}
         <div class="card lime-card"><h3>${t('disclaimer')}</h3></div>
-        <div class="card"><div class="card-h"><h3>${t('sourcesTitle')}</h3></div><ul class="sources">${[...nasa.map(([l, u]) => [l, u]), ...Object.values(SOURCES).map((s) => [s.label, s.url])].map(([l, u]) => `<li><a href="${u}" target="_blank" rel="noreferrer">${esc(l)}</a></li>`).join('')}</ul></div>
       </div>
-      <div class="card"><div class="card-h"><h3>${t('termsTitle')}</h3></div>${terms.map((k) => `<details class="term"><summary>${t(`t_${k}`)}</summary><p>${t(`d_${k}`)}</p></details>`).join('')}</div>
+      <div class="stack">
+        <div class="card"><div class="card-h"><h3>${t('termsTitle')}</h3></div>${terms.map((k) => `<details class="term"><summary>${t(`t_${k}`)}</summary><p>${t(`d_${k}`)}</p></details>`).join('')}</div>
+        <div class="card"><div class="card-h"><h3>${t('sourcesTitle')}</h3></div><ul class="sources">${all.map(([l, u]) => `<li><a href="${u}" target="_blank" rel="noreferrer">${esc(l)}</a></li>`).join('')}</ul></div>
+      </div>
     </div>`;
 }
+
+// ---------- landing ----------
+function renderLanding() {
+  const why = [['lW1t', 'lW1', 'drop'], ['lW2t', 'lW2', 'well'], ['lW3t', 'lW3', 'sun'], ['lW4t', 'lW4', 'coin']];
+  const proofs = [['lP1n', 'lP1'], ['lP2n', 'lP2'], ['lP3n', 'lP3']];
+  const lang = getLang() === 'en' ? '<b>EN</b> · ES' : 'EN · <b>ES</b>';
+  $('#landing').innerHTML = `<div class="land">
+    <header class="land-top"><span class="brand"><img src="assets/icon.svg" alt="" width="34" height="34"><span>terra</span></span><button class="lang">${lang}</button></header>
+    <section class="land-hero">
+      <div class="land-copy">
+        <span class="pill">${icon('globe', 16)}${t('lAny')}</span>
+        <h1>${t('lHead')}</h1>
+        <p>${t('lSub')}</p>
+        <div class="btn-row"><button class="btn primary big" data-act="land-try">${t('lTry')}${icon('arrow', 20)}</button><button class="btn big" data-act="land-mine">${icon('pin', 20)}${t('lMine')}</button></div>
+      </div>
+      <div class="land-art">${heroPlanet(420)}<div class="land-badge"><b>Arizona</b><span>${t('badgeAz')}</span></div></div>
+    </section>
+    <section class="land-proofs">${proofs.map(([n, l]) => `<div><b>${t(n)}</b><span>${t(l)}</span></div>`).join('')}</section>
+    <section class="land-why"><h2>${t('lWhyTitle')}</h2><div class="why-grid">${why.map(([h, b, ic]) => `<div class="card"><span class="why-ic">${icon(ic, 24)}</span><h3>${t(h)}</h3><p class="muted">${t(b)}</p></div>`).join('')}</div></section>
+    <section class="land-how"><h2>${t('lHowTitle')}</h2><ol class="steps">${[1, 2, 3, 4].map((n) => `<li><span>${t(`how${n}`)}</span></li>`).join('')}</ol>
+      <button class="btn primary big" data-act="land-try">${t('lStart')}${icon('arrow', 20)}</button></section>
+    <footer class="land-foot">${t('lFoot')}</footer>
+  </div>`;
+}
+function showLanding() { renderLanding(); $('#landing').hidden = false; document.body.style.overflow = 'hidden'; $('#landing').scrollTop = 0; }
+function hideLanding() { $('#landing').hidden = true; document.body.style.overflow = ''; try { localStorage.setItem('terra-seen', '1'); } catch { /* fine */ } }
 
 // ---------- setup ----------
 let setupStep = 1;
@@ -482,9 +664,11 @@ function renderSetup() {
   let body = '';
   if (s === 1) {
     body = `${scene('field')}<div class="stack" style="gap:6px"><h1>${t('s1Title')}</h1><p class="muted">${t('s1Sub')}</p></div>
-      <div class="choice-list">${FARMS.map((f) => `<button class="choice" aria-pressed="${!state.farm.custom && state.farm.id === f.id}" data-farm="${f.id}"><span><b>${f.name}</b><small>${f.area}</small></span><span class="tick"></span></button>`).join('')}
-      <button class="choice" data-act="locate"><span><b>${t('useLoc')}</b></span>${icon('pin', 22)}</button>
-      ${state.farm.custom ? `<button class="choice" aria-pressed="true"><span><b>${t('custom')}</b><small>${state.farm.lat.toFixed(3)}, ${state.farm.lon.toFixed(3)}</small></span><span class="tick"></span></button>` : ''}</div>`;
+      <div class="stack" style="gap:6px"><b>${t('s1Feat')}</b><span class="muted small">${t('s1FeatSub')}</span></div>
+      <div class="choice-list">${FARMS.map((f) => `<button class="choice" aria-pressed="${!state.farm.custom && state.farm.id === f.id}" data-farm="${f.id}"><span><b>${f.name}</b><small>${f.area}, Arizona</small></span><span class="tick"></span></button>`).join('')}</div>
+      <div class="stack" style="gap:6px"><b>${t('s1Else')}</b><span class="muted small">${t('s1ElseSub')}</span></div>
+      <div class="choice-list"><button class="choice" data-act="locate"><span><b>${t('useLoc')}</b></span>${icon('pin', 22)}</button>
+      ${state.farm.custom ? `<button class="choice" aria-pressed="true"><span><b>${t('custom')}</b><small>${state.farm.lat.toFixed(3)}, ${state.farm.lon.toFixed(3)}${inArizona(state.farm.lat, state.farm.lon) ? ' · Arizona' : ''}</small></span><span class="tick"></span></button>` : ''}</div>`;
   } else if (s === 2) {
     const cur = state.baseline.join();
     body = `${scene('rotation')}<div class="stack" style="gap:6px"><h1>${t('s2Title')}</h1><p class="muted">${t('s2Sub')}</p></div>
@@ -493,6 +677,9 @@ function renderSetup() {
     body = `${scene('water')}<h1>${t('s3Title')}</h1>
       <label class="slider"><span class="lab">${t('water')}<b class="num" id="allotV">${t('waterUnit', { n: state.allotment.toFixed(1) })}</b></span>
         <input type="range" id="allot" min="1" max="7" step="0.1" value="${state.allotment}"><span class="muted small">${t('waterHint')}</span></label>
+      <div class="stack" style="gap:8px"><span class="muted">${t('srcTitle')}</span><div class="seg" role="radiogroup">${['wells', 'mix', 'canal'].map((v) => `<button role="radio" aria-checked="${state.source === v}" data-src="${v}">${t(`src${v[0].toUpperCase()}${v.slice(1)}`)}</button>`).join('')}</div></div>
+      <label class="slider"><span class="lab">${t('priceLabel')}<b id="priceV">${t('priceUnit', { n: state.waterPrice })}</b></span>
+        <input type="range" id="priceIn" min="0" max="400" step="5" value="${state.waterPrice}"><span class="muted small">${t('priceHint')}</span></label>
       <div class="stack" style="gap:8px"><span class="muted">${t('irrigation')}</span><div class="seg" role="radiogroup">${['furrow', 'sprinkler', 'drip'].map((v) => `<button role="radio" aria-checked="${state.irrigation === v}" data-irr="${v}">${t(v)}</button>`).join('')}</div></div>
       <div class="stack" style="gap:8px"><span class="muted">${t('goals')}</span><div class="chips">${GOALS.map((g) => `<button aria-pressed="${state.goals.has(g)}" data-goal="${g}">${t(GOAL_LABEL[g])}</button>`).join('')}</div></div>`;
   }
@@ -500,6 +687,8 @@ function renderSetup() {
   $('#setup').innerHTML = `<div class="setup-in"><div class="stack" style="gap:8px">${prog}</div>${body}${foot}</div>`;
   const allot = $('#allot');
   if (allot) allot.addEventListener('input', () => { state.allotment = +allot.value; $('#allotV').textContent = t('waterUnit', { n: state.allotment.toFixed(1) }); });
+  const pr = $('#priceIn');
+  if (pr) pr.addEventListener('input', (e) => { e.stopPropagation(); state.waterPrice = +pr.value; $('#priceV').textContent = t('priceUnit', { n: state.waterPrice }); });
 }
 function finishSetup() {
   $('#setup').hidden = true;
@@ -580,10 +769,12 @@ document.addEventListener('click', (e) => {
   if (d.go) { if (d.plan) state.plan = +d.plan; renderPlans(); return go(d.go); }
   if (d.plan !== undefined && b.getAttribute('role') === 'tab') { state.plan = +d.plan; return renderPlans(); }
   if (d.layer) return setLayer(d.layer);
-  if (b.classList.contains('lang')) { setLang(getLang() === 'en' ? 'es' : 'en'); renderAll(); if (!$('#setup').hidden) renderSetup(); return; }
+  if (b.classList.contains('lang')) { setLang(getLang() === 'en' ? 'es' : 'en'); renderAll(); if (!$('#setup').hidden) renderSetup(); if (!$('#landing').hidden) renderLanding(); return; }
   if (b.id === 'placeChip') return openSetup(1);
   if (d.slot) { const [y, s] = d.slot.split('-'); return slotPicker(+y, s); }
   if (d.pick) { const [y, s, c] = d.pick.split('-'); return pick(+y, s, c); }
+  if (d.short) { state.shortage = d.short; renderBuild(); return recompute(); }
+  if (d.src) { state.source = d.src; return renderSetup(); }
   if (d.exclude) { const c = d.exclude; state.excluded.has(c) ? state.excluded.delete(c) : state.excluded.add(c); b.setAttribute('aria-pressed', String(state.excluded.has(c))); persist(); return recompute(); }
   // setup
   if (d.farm) { const f = FARMS.find((x) => x.id === d.farm); state.farm = { ...f }; return renderSetup(); }
@@ -612,10 +803,20 @@ document.addEventListener('click', (e) => {
     case 'set-now': state.baseline = state.build.slice(); persist(); toast(t('savedNow')); return recompute();
     case 'ics': return sheetRot && downloadIcs(sheetRot);
     case 'print': return window.print();
+    case 'fix-now': return openSetup(2);
+    case 'land-try': state.farm = { ...FARMS[0] }; hideLanding(); return openSetup(1);
+    case 'land-mine': hideLanding(); return openSetup(1);
+    case 'home': return showLanding();
   }
 });
 
 document.addEventListener('input', (e) => {
+  if (e.target.dataset.price) {
+    state.waterPrice = +e.target.value;
+    e.target.previousElementSibling.querySelector('b').textContent = t('priceUnit', { n: state.waterPrice });
+    persist();
+    return recompute();
+  }
   const k = e.target.dataset.stress;
   if (!k) return;
   state.stress[k] = +e.target.value;
@@ -635,5 +836,5 @@ initMap();
 loadField();
 let firstRun = true;
 try { firstRun = !localStorage.getItem('terra-setup'); } catch { /* fine */ }
-if (firstRun) openSetup(1);
+if (firstRun || location.hash === '#home') showLanding();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

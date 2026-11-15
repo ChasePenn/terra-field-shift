@@ -1,6 +1,6 @@
 // Runs the rotation engine off the main thread. Keeps the last weather and
 // settings in memory so a single custom rotation scores in milliseconds.
-import { run, createContext, scoreOne } from './engine.js';
+import { run, createContext, scoreOne, cropUse } from './engine.js';
 
 let ctx = null;
 let baseline = null;
@@ -14,7 +14,7 @@ self.onmessage = (e) => {
       const res = run(weather, inputs);
       ctx = res.ctx;
       baseline = res.baseline;
-      self.postMessage({ id, type, ok: true, climate: res.climate, cropYears: res.prep.cropYears, baseline: res.baseline, options: res.options, all: res.all.map(slim), inArea: ctx.inArea });
+      self.postMessage({ id, type, ok: true, climate: res.climate, cropYears: res.prep.cropYears, baseline: res.baseline, options: res.options, all: res.all.map(slim), inArea: ctx.inArea, cropUse: cropUse(ctx), calibrated: res.prep.calibrated, pmShare: res.prep.pmShare });
     } else if (type === 'score') {
       if (!ctx) throw new Error('No field loaded yet');
       self.postMessage({ id, type, ok: true, result: scoreOne(ctx, rotation, baseline) });
