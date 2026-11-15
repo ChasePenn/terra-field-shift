@@ -7,12 +7,17 @@
     "doc": "docs"
   },
   "scripts": {
-    "build:static": "node scripts/replit-data.mjs",
+    "prepare:map": "node scripts/prepare-map.mjs",
+    "prestart": "npm run prepare:map",
+    "build:static": "npm ci && npm run prepare:map && node scripts/replit-data.mjs",
     "start": "python3 -m http.server 5000 --bind 0.0.0.0 --directory terra",
     "fetch:data": "node scripts/fetch-data.mjs",
     "test": "node terra/test/engine.test.mjs"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "maplibre-gl": "^6.18.0"
+  }
 }

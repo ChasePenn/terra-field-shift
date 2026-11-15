@@ -62,4 +62,5 @@ export async function signOutNow() { if (fb) await fb.auth.signOut(fb.a); }
 
 export function savePlan(p) { plans = [p, ...plans.filter((x) => x.id !== p.id)].slice(0, 30); push(); emit(); }
 export function removePlan(id) { plans = plans.filter((x) => x.id !== id); push(); emit(); }
+export function removePlans(ids) { const remove = new Set(ids); const next = plans.filter((x) => !remove.has(x.id)); if (next.length === plans.length) return; plans = next; push(); emit(); }
 export function renamePlan(id, name) { const p = plans.find((x) => x.id === id); if (p) { p.name = name; push(); emit(); } }
