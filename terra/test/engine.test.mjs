@@ -79,10 +79,10 @@ console.log('Baseline: ' + res.baseline.labels.join(' | ') + `  ${res.baseline.n
 for (const o of res.options) console.log('Option:   ' + o.labels.join(' | ') + `  ${o.netAcft.toFixed(2)} ac-ft/ac`, o.scores, o.confidence.level);
 
 // 6. Each named plan really leads its goal.
-const real = (r) => r.seq.filter((x) => x.parts.some((c) => CROPS[c]?.role === 'cash')).length >= 2 && !r.seq.every((x, _, a) => x.parts.filter((c) => CROPS[c]?.role === 'cash').join() === a[0].parts.filter((c) => CROPS[c]?.role === 'cash').join() && a[0].parts.some((c) => CROPS[c]?.role === 'cash'));
+const real = (r) => r.seq.filter((x) => x.parts.some((c) => CROPS[c]?.role === 'cash')).length === 3 && !r.seq.every((x, _, a) => x.parts.filter((c) => CROPS[c]?.role === 'cash').join() === a[0].parts.filter((c) => CROPS[c]?.role === 'cash').join() && a[0].parts.some((c) => CROPS[c]?.role === 'cash'));
 const others = res.all.filter((r) => r.rotation.join() !== inputs.baseline.join() && real(r));
 const inc = res.options.find((o) => o.lenses.includes('income'));
-assert.ok(others.every((r) => r.money.mean <= inc.money.mean + 1e-9), 'Most income plan must earn the most');
+assert.ok(others.every((r) => r.money.cash <= inc.money.cash + 1e-9), 'Most income plan must earn the most');
 assert.ok(others.every((r) => r.scores.income <= inc.scores.income), 'Most income plan must have the top income score');
 const wat = res.options.find((o) => o.lenses.includes('water'));
 assert.ok(res.options.every((o) => o.netAcft >= wat.netAcft - 1e-9), 'Least water plan must use the least water of the options');

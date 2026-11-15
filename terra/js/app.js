@@ -39,7 +39,7 @@ const state = {
   baseline: saved.baseline || PRESETS[0].rot.slice(),
   allotment: saved.allotment ?? 4.1,
   irrigation: saved.irrigation || 'furrow',
-  source: saved.source || 'mix',
+  source: ['wells', 'mix', 'canal'].includes(saved.source) ? saved.source : 'mix',
   waterPrice: saved.waterPrice ?? WATER_PRICE_DEFAULT,
   shortage: 'none',
   wells: null, area: undefined, val: null, ama: null,
@@ -127,23 +127,23 @@ async function loadField() {
   const bundledSoil = demo?.soil?.[id];
   const bundledNdvi = demo?.ndvi?.[id];
   if (bundledSoil && bundledSoil.sand != null) state.soil = { ...bundledSoil, silt: bundledSoil.silt ?? 100 - bundledSoil.sand - bundledSoil.clay, texture: textureClass(bundledSoil.sand, bundledSoil.clay) };
-  else fetchSoil(lat, lon, signal).then((s) => { state.soil = s; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.soil = { error: true }; renderField(); } });
+  else fetchSoil(lat, lon, signal).then((s) => { state.soil = s; renderField(); }).catch((e) => { if (!signal.aborted) { state.soil = { error: true }; renderField(); } });
   const toRows = (r) => r.map((x) => (Array.isArray(x) ? x : [x.date, x.ndvi]));
   if (bundledNdvi && bundledNdvi.length) state.ndvi = toRows(bundledNdvi);
-  else fetchNdvi(lat, lon, 5, signal).then((r) => { state.ndvi = toRows(r); renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.ndvi = { error: true }; renderField(); } });
+  else fetchNdvi(lat, lon, 5, signal).then((r) => { state.ndvi = toRows(r); renderField(); }).catch((e) => { if (!signal.aborted) { state.ndvi = { error: true }; renderField(); } });
   const bundledWells = demo?.wells?.[id];
   if (bundledWells) state.wells = bundledWells;
-  else if (az) fetchWells(lat, lon, signal).then((w) => { state.wells = w; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.wells = []; renderField(); } });
+  else if (az) fetchWells(lat, lon, signal).then((w) => { state.wells = w; renderField(); }).catch((e) => { if (!signal.aborted) { state.wells = []; renderField(); } });
   else state.wells = [];
   state.forecast = null; state.alerts = null;
-  fetchForecast(lat, lon, signal).then((f) => { state.forecast = f; renderSaved(); renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.forecast = { error: true }; renderSaved(); } });
+  fetchForecast(lat, lon, signal).then((f) => { state.forecast = f; renderSaved(); renderField(); }).catch((e) => { if (!signal.aborted) { state.forecast = { error: true }; renderSaved(); } });
   if (lat > 18 && lat < 72 && lon < -60) fetchAlerts(lat, lon, signal).then((a) => { state.alerts = a; renderSaved(); renderField(); }).catch(() => { state.alerts = []; });
   else state.alerts = [];
   try {
     state.weather = demoWeather(demo, id) || await fetchPower(lat, lon, signal);
     recompute();
     renderField();
-    fetchRecent(lat, lon, state.weather, signal).then((r) => { state.recent = r; renderField(); }).catch((e) => { if (e.name !== 'AbortError') { state.recent = { error: true }; renderField(); } });
+    fetchRecent(lat, lon, state.weather, signal).then((r) => { state.recent = r; renderField(); }).catch((e) => { if (!signal.aborted) { state.recent = { error: true }; renderField(); } });
   } catch (e) {
     if (e.name === 'AbortError') return;
     state.loadError = e.message;
@@ -360,13 +360,13 @@ function moneyBlock(r) {
 function shortageCard(r) {
   if (!r.tiers || !isAz()) return '';
   const n = r.replay.length;
-  if ((CAP_SHARE[state.source] ?? 0) === 0) return `<div class="card"><div class="card-h"><h3>${t('shortTitle')}</h3></div><p class="muted">${t('shWells')}</p></div>`;
+  if ((CAP_SHARE[state.source] ?? 0) === 0) return `<div class="card"><div class="card-h"><h3>${t('shortTitle')}</h3></div><p class="muted">${t('shWells')}</p><button class="btn small" data-edit="3" style="margin-top:12px">${t('srcChange')}</button></div>`;
   const cells = [['none', 'shNone'], ['tier1', 'shTier1'], ['tier2', 'shTier2']].map(([k, lab]) => {
     const o = r.tiers[k];
     const cls = o.good >= n * 0.8 ? 'ok' : o.good >= n * 0.4 ? 'mid' : 'low';
     return `<div class="tier ${cls}${state.shortage === k ? ' on' : ''}"><small>${t(lab)}</small><b>${t('shGood', { n: o.good, t: n })}</b><span>${t('shMoney', { v: usd(o.cash) })}</span></div>`;
   }).join('');
-  return `<div class="card"><div class="card-h"><h3>${t('shortTitle')}</h3></div><div class="tiers">${cells}</div>${wm('wm_short')}</div>`;
+  return `<div class="card"><div class="card-h"><h3>${t('shortTitle')}</h3></div><div class="tiers">${cells}</div><p class="muted small" style="margin-top:10px">${t('srcNow', { src: t(`src${state.source[0].toUpperCase()}${state.source.slice(1)}`) })}</p><button class="btn small" data-edit="3" style="margin-top:12px">${t('srcChange')}</button>${wm('wm_short')}</div>`;
 }
 
 function heroCrop(r) {
@@ -545,7 +545,7 @@ function renderBuild() {
   const dT = state.stress.dT, rp = state.stress.rainPct;
   el.innerHTML = `
     <div class="screen-h"><h1>${t('buildTitle')}</h1>
-      <div class="btn-row"><label class="select"><span>${t('loadPlan')}</span><select id="fromPlan"><option value="">${t('choosePlan')}</option>${optionNames(planList()).map((n, k) => `<option value="${k}">${esc(n)}</option>`).join('')}</select></label><button class="btn small" data-act="set-now">${t('setNow')}</button><button class="btn small" data-act="save-plan" data-src="build">${icon('heart', 16)}${t('savePlan')}</button></div></div>
+      <div class="btn-row"><label class="select"><span>${t('loadPlan')}</span><select id="fromPlan"><option value="">${t('choosePlan')}</option>${optionNames(planList()).map((n, k) => `<option value="${k}">${esc(n)}</option>`).join('')}</select></label><button class="btn small" data-act="set-now">${t('setNow')}</button><button class="btn small" data-act="save-plan" data-from="build">${icon('heart', 16)}${t('savePlan')}</button></div></div>
     <div class="build-grid">
       <div>${years}
         <div class="card" style="margin-top:10px"><div class="card-h"><h3>${t('whatIf')}</h3></div>
@@ -976,7 +976,7 @@ document.addEventListener('click', (e) => {
   if (d.slot) { const [tg, y, s] = d.slot.split('-'); return slotPicker(tg, +y, s); }
   if (d.pick) { const [tg, y, s, c] = d.pick.split('-'); return pick(tg, +y, s, c); }
   if (d.short) { state.shortage = d.short; renderBuild(); return recompute(); }
-  if (d.src) { state.source = d.src; return renderSetup(); }
+  if (d.src && ['wells', 'mix', 'canal'].includes(d.src)) { state.source = d.src; return renderSetup(); }
   if (d.exclude) { const c = d.exclude; state.excluded.has(c) ? state.excluded.delete(c) : state.excluded.add(c); b.setAttribute('aria-pressed', String(state.excluded.has(c))); persist(); if ($('#setup').hidden) recompute(); return; }
   if (d.delplan) { removePlan(d.delplan); return; }
   if (d.openplan) { const p = getPlans().find((x) => x.id === d.openplan); if (p) { state.build = p.rotation.slice(); renderBuild(); scoreBuild(); go('build'); } return; }
@@ -1005,7 +1005,7 @@ document.addEventListener('click', (e) => {
     case 'why-build': return state.buildResult && whySheet(state.buildResult);
     case 'month-build': return state.buildResult && monthSheet(state.buildResult);
     case 'edit-plan': state.build = cur.rotation.slice(); renderBuild(); scoreBuild(); return go('build');
-    case 'save-plan': return doSave(d.src === 'build' ? state.buildResult : cur, d.src === 'build');
+    case 'save-plan': return doSave(d.from === 'build' ? state.buildResult : cur, d.from === 'build');
     case 'sign-in': return signIn().catch((e) => toast(e.message === 'no-accounts' ? t('noAccounts') : t('signInFail')));
     case 'sign-out': return signOutNow();
     case 'tour': return tour(0);

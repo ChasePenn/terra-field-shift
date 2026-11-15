@@ -148,6 +148,8 @@ export const STR = {
     shNone: 'Full canal water', shTier1: '2022 cut', shTier2: 'No canal water',
     shGood: '{n} of {t} years fit', shMoney: '{v} per acre',
     shWells: 'You get your water from wells, so canal cuts don’t change this plan.',
+    srcChange: 'Change water source',
+    srcNow: 'Your water: {src}',
     // build additions
     canalSet: 'Canal water this year', priceSet: 'Water price',
     // learn additions
@@ -375,6 +377,8 @@ export const STR = {
     shNone: 'Canal completo', shTier1: 'Corte de 2022', shTier2: 'Sin agua del canal',
     shGood: '{n} de {t} años alcanza', shMoney: '{v} por acre',
     shWells: 'Su agua viene de pozos, así que los cortes del canal no cambian este plan.',
+    srcChange: 'Cambiar fuente de agua',
+    srcNow: 'Tu agua: {src}',
     canalSet: 'Agua del canal este año', priceSet: 'Precio del agua',
     methodsTitle: 'Cómo revisamos nuestro trabajo',
     mFlow: 'De dónde salen los números',

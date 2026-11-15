@@ -385,7 +385,7 @@ export function evaluate(rotation, ctx) {
   // Income: where this plan's average profit sits among all plans checked.
   // Income score: where this plan's average profit sits between a weak plan (10th percentile) and the best plan.
   const pr = ctx.profitRank;
-  const income = pr ? clamp(100 * (money.mean - quantile(pr, 0.1)) / Math.max(1, pr[pr.length - 1] - quantile(pr, 0.1))) : 50;
+  const income = pr ? clamp(100 * (money.cash - quantile(pr, 0.1)) / Math.max(1, pr[pr.length - 1] - quantile(pr, 0.1))) : 50;
 
   const w = ctx.weights;
   const wsum = w.water + w.soil + w.resilience + w.income || 1;
@@ -397,7 +397,7 @@ export function evaluate(rotation, ctx) {
     families: [...families], pestBreak, sameCropRepeats, alfalfaYears,
     scores: { water: Math.round(water), soil: Math.round(soil), resilience: Math.round(resilience), income: Math.round(income), total: Math.round(total * 10) / 10 },
     confidence: confidenceFor(seq, ctx),
-    detail: { ratio, good, warn, years: replay.length, worst3, incomePct: ctx.profitRank ? rankOf(ctx.profitRank, money.mean) : null, waterPct: ctx.waterRank ? 1 - rankOf(ctx.waterRank, grossAcft) : null, plans: ctx.waterRank ? ctx.waterRank.length : 0 },
+    detail: { ratio, good, warn, years: replay.length, worst3, incomePct: ctx.profitRank ? rankOf(ctx.profitRank, money.cash) : null, waterPct: ctx.waterRank ? 1 - rankOf(ctx.waterRank, grossAcft) : null, plans: ctx.waterRank ? ctx.waterRank.length : 0 },
   };
 }
 
@@ -519,12 +519,14 @@ export function run(weather, inputs) {
   // First pass finds every plan's profit, second pass scores income against them.
   ctx.lite = true;
   const lite = rots.map((rot) => evaluate(rot, ctx));
-  // A real plan sells a crop in at least 2 of 3 years and does not plant the same cash crop all 3 years.
+  // A real plan sells a crop every year (no blank years) and does not plant the same cash crop all 3 years.
+  // If the farmer left out so many crops that too few plans qualify, relax step by step.
   const cash = (id) => id.split('+').filter((c) => CROPS[c]?.role === 'cash');
   const cashYears = (r) => r.rotation.filter((id) => cash(id).length).length;
   const mono = (r) => { const ids = r.rotation.map((id) => cash(id).join('+')); return ids[0] && ids.every((x) => x === ids[0]); };
-  const realPlan = (r) => cashYears(r) >= 2 && !mono(r);
-  ctx.profitRank = lite.filter(realPlan).map((x) => x.money.mean).sort((a, b) => a - b);
+  const tests = [(r) => cashYears(r) === 3 && !mono(r), (r) => cashYears(r) >= 2 && !mono(r), (r) => cashYears(r) >= 2, (r) => cashYears(r) >= 1, () => true];
+  const realPlan = tests.find((f) => lite.filter(f).length >= 8) || tests[tests.length - 1];
+  ctx.profitRank = lite.filter(realPlan).map((x) => x.money.cash).sort((a, b) => a - b);
   ctx.waterRank = lite.map((x) => x.grossAcft).sort((a, b) => a - b);
   ctx.lite = false;
   const all = rots.map((rot) => evaluate(rot, ctx));
@@ -535,15 +537,17 @@ export function run(weather, inputs) {
   const strong = pool.filter((r) => r.scores.total >= quantile(totals, 0.7)); // skip silly plans like leaving the field bare
   const top = (list, cmp) => [...list].sort(cmp)[0];
   const leaders = [
-    ['income', top(pool, (a, b) => b.money.mean - a.money.mean || b.scores.total - a.scores.total)],
+    ['income', top(pool, (a, b) => b.money.cash - a.money.cash || b.scores.total - a.scores.total)],
     ['water', top(strong, (a, b) => a.netAcft - b.netAcft || b.scores.total - a.scores.total)],
     ['soil', top(strong, (a, b) => b.scores.soil - a.scores.soil || b.scores.total - a.scores.total)],
     // Held up best in this field's worst past years: most years within supply, smallest shortfall in the 3 worst, then income.
-    ['safe', top(pool, (a, b) => b.detail.good - a.detail.good || a.detail.worst3 - b.detail.worst3 || b.money.mean - a.money.mean)],
+    ['safe', top(pool, (a, b) => b.detail.good - a.detail.good || a.detail.worst3 - b.detail.worst3 || b.money.cash - a.money.cash)],
   ];
   const options = [];
-  for (const [lens, r] of leaders) {
-    if (!r) continue;
+  for (const [lens, lead] of leaders) {
+    if (!lead) continue;
+    // If a plan already on the list does just as well in bad years, name that one instead of adding a near copy.
+    const r = lens === 'safe' ? options.find((o) => o.detail.good === lead.detail.good && o.detail.worst3 <= lead.detail.worst3 + 0.02) || lead : lead;
     r.lenses = r.lenses || [];
     r.lenses.push(lens);
     if (lens === 'safe') r.safest = true;
