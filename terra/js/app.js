@@ -1,7 +1,7 @@
 import { CROPS, SOURCES, WINTER, SUMMER, BEFORE_COTTON, REFERENCE_USE_IN } from './crops.js';
 import { fmt, GALLONS_PER_ACFT } from './engine.js';
 import { fetchPower, fetchNdvi, fetchRecent, fetchSoil, fetchWells, fetchForecast, fetchAlerts, loadDemo, loadBundle, demoWeather, textureClass, LAYERS } from './nasa.js';
-import { initAccount, onAccount, accountsReady, signIn, signOutNow, savePlan, removePlan, getPlans } from './account.js';
+import { initAccount, onAccount, accountsReady, signIn, signOutNow, savePlan, removePlan, removePlans, getPlans } from './account.js';
 import { rings, calendarStrip, replayStrip, sparkline, icon, yearBars, depthLine, pairBars, flowDiagram } from './charts.js';
 import { inArizona, yearTypes } from './engine.js';
 import { findArea, AREA_FACTS, GW_SOURCES, wellTrend, wellSeries, satelliteCheck } from './local.js';
@@ -48,8 +48,9 @@ const state = {
   stress: { dT: 0, rainPct: 0 },
   screen: 'field', layer: 'none', plan: 1,
   weather: null, res: null, build: null, buildResult: null,
-  ndvi: null, soil: null, recent: null, loadError: null,
+  ndvi: null, soil: null, recent: null, loadError: null, exporting: false,
   forecast: null, alerts: null, account: { user: null, plans: [], cloud: false }, savedScores: null,
+  sessionSetups: [], setupBackup: null,
 };
 function load() { try { return JSON.parse(localStorage.getItem('terra-farm') || '{}'); } catch { return {}; } }
 function persist() {
@@ -163,10 +164,65 @@ function renderShell() {
   document.documentElement.lang = getLang();
   $$('.screen').forEach((s) => (s.hidden = s.dataset.screen !== state.screen));
 }
+function setupConfig() {
+  return {
+    farm: { ...state.farm }, baseline: [...state.baseline], allotment: state.allotment,
+    irrigation: state.irrigation, source: state.source, waterPrice: state.waterPrice,
+    goals: [...state.goals], excluded: [...state.excluded], shortage: state.shortage,
+  };
+}
+function applySetupConfig(config) {
+  state.farm = { ...config.farm };
+  state.baseline = [...config.baseline];
+  state.allotment = config.allotment;
+  state.irrigation = config.irrigation;
+  state.source = config.source;
+  state.waterPrice = config.waterPrice;
+  state.goals = new Set(config.goals || []);
+  state.excluded = new Set(config.excluded || []);
+  state.shortage = config.shortage || 'none';
+  state.build = [...state.baseline];
+  state.plan = 0;
+}
+function setupProfileLabel(config) {
+  const farm = config.farm.custom ? t('custom') : config.farm.name;
+  const rotation = config.baseline.map(id => TYPES.find(x => x.id === id)?.parts.map(crop).join(' + ') || id).join(' / ');
+  return t('setupProfileName', { farm, rotation });
+}
+function saveSessionSetup() {
+  const config = setupConfig();
+  const key = JSON.stringify(config);
+  const prior = state.sessionSetups.find(p => p.key === key);
+  state.sessionSetups = [
+    { id: prior?.id || `setup-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, key, config },
+    ...state.sessionSetups.filter(p => p.key !== key),
+  ];
+}
+function activateSetup(config, screen = 'plans') {
+  const moved = configLocationChangedAfter(config);
+  applySetupConfig(config);
+  state.setupBackup = null;
+  $('#setup').hidden = true;
+  persist();
+  if (marker) marker.setLngLat([state.farm.lon, state.farm.lat]);
+  if (map && moved) map.flyTo({ center: [state.farm.lon, state.farm.lat], zoom: 12.5, duration: 1800 });
+  go(screen);
+  if (moved) loadField(); else recompute();
+}
+function configLocationChangedAfter(config) {
+  return !state.weather || state.weather.lat !== +config.farm.lat.toFixed(2) || state.weather.lon !== +config.farm.lon.toFixed(2);
+}
+function cancelNewSetup() {
+  const backup = state.setupBackup;
+  if (!backup) { $('#setup').hidden = true; return; }
+  activateSetup(backup.config, backup.screen);
+}
+
 function go(screen) {
   state.screen = screen;
   if (location.hash !== `#${screen}`) history.replaceState(null, '', `#${screen}`);
   renderShell();
+  if (screen === 'saved') renderSaved();
   if (screen === 'field' && map) setTimeout(() => map.resize(), 0);
   window.scrollTo({ top: 0 });
 }
@@ -398,6 +454,7 @@ function waterDelta(r, base) {
 
 function renderPlans() {
   const el = $('#screen-plans');
+  if (state.exporting) return renderExportData();
   const list = planList();
   if (!list.length) { el.innerHTML = `<div class="screen-h"><h1>${t('navPlans')}</h1></div><div class="stack"><div class="skeleton" style="min-height:260px"></div><div class="skeleton" style="min-height:160px"></div></div>`; return; }
   const i = Math.min(state.plan, list.length - 1);
@@ -406,7 +463,7 @@ function renderPlans() {
   const tabs = list.map((p, k) => `<button role="tab" aria-selected="${k === i}" data-plan="${k}">${esc(names[k])}</button>`).join('');
   const fits = r.replay.filter((y) => y.status === 'good').length;
   el.innerHTML = `
-    <div class="screen-h"><h1>${t('navPlans')}</h1><div class="tabs" role="tablist">${tabs}</div></div>
+    <div class="screen-h"><h1>${t('navPlans')}</h1><div class="export-head-actions"><div class="tabs" role="tablist">${tabs}</div><button class="btn small export-action-btn" data-act="export-data"><span class="export-button-icon">${icon('download', 17)}</span><span>${t('exportData')}</span></button></div></div>
     <div class="plan-grid">
       <div class="stack">
         <div class="card ${i > 0 ? 'lime-card' : ''} plan-hero">${heroPlanet(230)}
@@ -432,6 +489,94 @@ function renderPlans() {
         ${shortageCard(r)}
       </div>
     </div>`;
+}
+
+// ---------- export data ----------
+function exportRows() {
+  const list = planList();
+  const names = optionNames(list);
+  const summaryHeaders = [
+    t('exPlan'), t('exRotation'), t('exNetWater'), t('exGrossWater'), t('exSupply'), t('exNeedSupply'),
+    t('exCash'), t('exProfit'), t('exProfitLow'), t('exProfitHigh'), t('exRevenue'), t('exWaterCost'),
+    t('exGoodYears'), t('exTightYears'), t('exOverYears'), t('exWorstShortfall'),
+    t('exWaterScore'), t('exSoilScore'), t('exResilienceScore'), t('exIncomeScore'), t('exOverallScore'),
+    t('exBareMonths'), t('exWindyBare'), t('exLegumes'), t('exFamilies'), t('exPestBreak'), t('exConfidence'),
+    t('exNoCutProfit'), t('exTier1Profit'), t('exTier2Profit'),
+  ];
+  const summaries = list.map((r, i) => {
+    const good = r.replay.filter(y => y.status === 'good').length;
+    const warn = r.replay.filter(y => y.status === 'warn').length;
+    const bad = r.replay.filter(y => y.status === 'bad').length;
+    const seq = r.seq.map(y => y.parts.map(crop).join(' + ')).join(' / ');
+    const conf = r.confidence?.level ? t(r.confidence.level) : '';
+    return [names[i], seq, r.netAcft, r.grossAcft, r.supply, r.detail.ratio * 100,
+      r.money.cash, r.money.mean, r.money.low, r.money.high, r.money.revenue, r.money.waterCost,
+      good, warn, bad, r.detail.worst3 * 100,
+      r.scores.water, r.scores.soil, r.scores.resilience, r.scores.income, r.scores.total,
+      r.bareMonths, r.windyBare, r.legumeSeasons, r.families.length, r.pestBreak * 100, conf,
+      r.tiers.none?.profit ?? '', r.tiers.tier1?.profit ?? '', r.tiers.tier2?.profit ?? ''];
+  });
+  const replayHeaders = [t('exPlan'), t('exCropYear'), t('exGrossWater'), t('exAvailableWater'), t('exCash'), t('exProfit'), t('exWaterCost'), t('exYearStatus'), t('exStressEvents')];
+  const replay = list.flatMap((r, i) => r.replay.map(y => [names[i], y.cy, y.worstGross, r.supply, y.cash, y.profit, y.waterCost, t(`exStatus_${y.status}`), y.hits.length]));
+  const cl = state.res?.climate || {};
+  const area = state.area;
+  const trend = state.wells ? wellTrend(state.wells) : null;
+  const context = [
+    [t('exFarm'), placeName()], [t('exCoordinates'), `${state.farm.lat}, ${state.farm.lon}`],
+    [t('exWaterSource'), t(state.source === 'wells' ? 'srcWells' : state.source === 'canal' ? 'srcCanal' : 'srcMix')],
+    [t('exCapShare'), (CAP_SHARE[state.source] ?? 0) * 100], [t('exShortage'), t(state.shortage === 'tier1' ? 'shTier1' : state.shortage === 'tier2' ? 'shTier2' : 'shNone')],
+    [t('exAllotment'), state.allotment], [t('exIrrigation'), t(state.irrigation)], [t('exEfficiency'), ({ drip: 90, sprinkler: 80, furrow: 70 })[state.irrigation]],
+    [t('exWaterPrice'), state.waterPrice], [t('exWeatherYears'), cl.years ?? ''], [t('exRain'), cl.rainIn ?? ''], [t('exEt0'), cl.et0In ?? ''],
+    [t('exHeatDays'), cl.hot110 ?? ''], [t('exFrostNights'), cl.frost ?? ''], [t('exCalibration'), cl.calibrated ? t('exCalibrated') : t('exUncalibrated')],
+    [t('exPmShare'), cl.pmShare == null ? '' : cl.pmShare * 100],
+    [t('exGroundwaterArea'), area?.name || area?.ama || ''],
+    [t('exWellDepth'), trend?.latestDepthFt ?? ''], [t('exWellTrend'), trend?.perDecadeFt ?? ''],
+  ];
+  const guide = [
+    [t('exNetWater'), t('exDefNetWater')], [t('exGrossWater'), t('exDefGrossWater')], [t('exMoneyGuide'), t('exDefMoney')],
+    [t('exScoreGuide'), t('exDefScore')], [t('exStatusGuide'), t('exDefStatus')], [t('exPercentiles'), t('exDefPercentiles')],
+    [t('exShortageGuide'), t('exDefShortage')], [t('exModelNote'), t('exDefModel')],
+  ];
+  return { summaryHeaders, summaries, replayHeaders, replay, context, guide };
+}
+function exportNumber(v, digits = 2) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return v ?? '';
+  return Number(v.toFixed(digits));
+}
+function exportDisplayRows(rows, percentColumns = []) {
+  return rows.map(row => row.map((v, i) => {
+    if (typeof v !== 'number') return esc(v ?? '');
+    const n = percentColumns.includes(i) ? `${exportNumber(v, 1)}%` : exportNumber(v, 2);
+    return esc(n);
+  }));
+}
+function renderExportData() {
+  const el = $('#screen-plans');
+  const x = exportRows();
+  const summary = exportDisplayRows(x.summaries, [5, 15, 25]);
+  const replay = exportDisplayRows(x.replay);
+  el.innerHTML = `<div class="export-page">
+    <div class="screen-h export-title"><div><button class="export-back" data-act="export-back">${icon('arrow', 17)}${t('back')}</button><h1>${t('exportData')}</h1><p class="muted">${t('exportSubtitle')}</p></div><button class="btn primary export-action-btn" data-act="export-download"><span class="export-button-icon">${icon('download', 18)}</span><span>${t('downloadCsv')}</span></button></div>
+    <section class="card export-section"><div class="card-h"><div><h3>${t('exPlansTitle')}</h3><p class="muted small">${t('exPlanHint')}</p></div></div><div class="export-scroll"><table class="export-table"><thead><tr>${x.summaryHeaders.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${summary.map(row => `<tr>${row.map(v => `<td>${v}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
+    <section class="card export-section"><div class="card-h"><div><h3>${t('exReplayTitle')}</h3><p class="muted small">${t('exReplayHint')}</p></div></div><div class="export-scroll"><table class="export-table"><thead><tr>${x.replayHeaders.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${replay.map(row => `<tr>${row.map(v => `<td>${v}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
+    <div class="export-lower"><section class="card export-section"><div class="card-h"><h3>${t('exContextTitle')}</h3></div><div class="export-info">${x.context.map(([k,v]) => `<div><span>${esc(k)}</span><b>${esc(typeof v === 'number' ? exportNumber(v) : v ?? '')}</b></div>`).join('')}</div></section>
+    <section class="card export-section"><div class="card-h"><h3>${t('exGuideTitle')}</h3></div><div class="export-info">${x.guide.map(([k,v]) => `<div><span>${esc(k)}</span><p>${esc(v)}</p></div>`).join('')}</div></section></div>
+    <p class="muted small export-foot">${t('exFooter')}</p>
+  </div>`;
+}
+function downloadExport() {
+  const x = exportRows();
+  const quote = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [
+    [t('exPlansTitle')], x.summaryHeaders, ...x.summaries,
+    [], [t('exReplayTitle')], x.replayHeaders, ...x.replay,
+    [], [t('exContextTitle')], [t('exField'), t('exValue')], ...x.context,
+    [], [t('exGuideTitle')], [t('exField'), t('exValue')], ...x.guide,
+  ].map(row => row.map(quote).join(',')).join('\r\n');
+  const blob = new Blob([`\ufeff${lines}`], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'terra-farm-plan-export.csv'; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // ---------- sheets ----------
@@ -738,6 +883,8 @@ function renderSetup() {
 }
 function finishSetup() {
   $('#setup').hidden = true;
+  saveSessionSetup();
+  state.setupBackup = null;
   try { localStorage.setItem('terra-setup', '1'); } catch { /* fine */ }
   persist();
   state.build = state.baseline.slice();
@@ -944,10 +1091,48 @@ function renderSaved() {
       ${notes.map((n) => `<div class="note-row ${n.kind}">${icon(n.kind === 'heat' ? 'sun' : 'cloud', 18)}<span>${esc(n.text)}</span></div>`).join('')}
       <div class="btn-row"><button class="btn small" data-openplan="${p.id}">${t('openBuild')}</button><button class="btn small" data-delplan="${p.id}">${t('remove')}</button></div></div>`;
   }).join('');
+  const recentSetups = `<div class="card recent-setups-card"><div class="card-h"><div><h3>${t('recentSetups')}</h3><p class="muted small">${t('temporarySetupsNote')}</p></div><button class="btn small primary setup-new" data-new-setup><i class="setup-new-plus" aria-hidden="true">+</i><span>${t('newSetup')}</span></button></div>
+    ${state.sessionSetups.length ? `<div class="setup-profile-list">${state.sessionSetups.map(p => `<button class="setup-profile-row" data-setup-profile="${p.id}"><b>${esc(setupProfileLabel(p.config))}</b><small>${esc(t('setupProfileDetails', { water: p.config.allotment.toFixed(1), irrigation: t(p.config.irrigation) }))}</small></button>`).join('')}</div>` : `<div class="setup-empty"><b>${t('noSetups')}</b><p>${t('noSetupsHelp')}</p></div>`}
+  </div>`;
   el.innerHTML = `<div class="screen-h"><h1>${t('navSaved')}</h1></div>
     <div class="learn-grid"><div class="stack">${weather}${acct}</div>
-    <div class="stack">${cards || `<div class="card"><h3>${t('noSaved')}</h3><p class="muted" style="margin-top:6px">${t('noSavedSub')}</p></div>`}
-    ${others > 0 ? `<p class="muted small">${t('otherFarms', { n: others })}</p>` : ''}</div></div>`;
+    <div class="stack">${recentSetups}<section class="saved-plans-section"><div class="saved-plans-heading"><h2>${t('savedPlansTitle')}</h2><button class="btn small" data-act="manage-saved-plans">${t('managePlans')}</button></div>${cards || `<div class="card"><h3>${t('noSaved')}</h3><p class="muted" style="margin-top:6px">${t('noSavedSub')}</p></div>`}
+    ${others > 0 ? `<p class="muted small">${t('otherFarms', { n: others })}</p>` : ''}</section></div></div>`;
+}
+
+let pendingSavedDeleteIds = [];
+function manageSavedPlansSheet() {
+  openSheet(`<div class="sheet-h"><h2>${t('manageSavedTitle')}</h2><button class="icon-btn" data-close aria-label="${t('close')}">${icon('close', 20)}</button></div>
+    <p class="muted">${t('manageSavedPrompt')}</p>
+    <div class="btn-row" style="margin-top:18px"><button class="btn" data-close>${t('cancel')}</button><button class="btn primary" data-act="show-saved-delete-list">${t('continue')}</button></div>`);
+}
+function savedPlanDeleteListSheet() {
+  const plans = getPlans();
+  const rows = plans.map(p => `<div class="saved-delete-row"><div><b>${esc(p.name)}</b><small>${esc(p.farm?.name || '')} · ${new Date(p.savedAt).toLocaleDateString(getLang() === 'es' ? 'es-MX' : 'en-US')}</small></div><button class="btn small danger" data-remove-saved="${esc(p.id)}">${t('deletePlan')}</button></div>`).join('');
+  openSheet(`<div class="sheet-h"><h2>${t('manageSavedTitle')}</h2><button class="icon-btn" data-close aria-label="${t('close')}">${icon('close', 20)}</button></div>
+    <p class="muted small">${t('savedPlanListHint')}</p>
+    ${plans.length ? `<div class="saved-delete-list">${rows}</div><div class="btn-row" style="margin-top:18px"><button class="btn" data-close>${t('cancel')}</button><button class="btn danger" data-act="delete-all-saved">${t('deleteAllPlans')}</button></div>` : `<div class="setup-empty"><b>${t('noPlansToDelete')}</b></div><div class="btn-row" style="margin-top:18px"><button class="btn" data-close>${t('close')}</button></div>`}`);
+}
+function confirmSavedPlanDeletion(ids) {
+  const available = new Set(getPlans().map(p => p.id));
+  pendingSavedDeleteIds = [...new Set(ids)].filter(id => available.has(id));
+  if (!pendingSavedDeleteIds.length) return savedPlanDeleteListSheet();
+  const targets = getPlans().filter(p => pendingSavedDeleteIds.includes(p.id));
+  const message = targets.length === 1
+    ? t('deleteOneConfirm', { name: targets[0].name })
+    : t('deleteManyConfirm', { n: targets.length });
+  openSheet(`<div class="sheet-h"><h2>${t('deleteConfirmTitle')}</h2><button class="icon-btn" data-close aria-label="${t('close')}">${icon('close', 20)}</button></div>
+    <p>${esc(message)}</p><p class="muted small" style="margin-top:8px">${t('deleteCannotUndo')}</p>
+    <div class="btn-row" style="margin-top:18px"><button class="btn" data-act="back-to-saved-delete-list">${t('deleteCancel')}</button><button class="btn danger" data-act="confirm-saved-delete">${t('deletePlan')}</button></div>`);
+}
+function completeSavedPlanDeletion() {
+  const ids = pendingSavedDeleteIds.slice();
+  if (!ids.length) return savedPlanDeleteListSheet();
+  pendingSavedDeleteIds = [];
+  removePlans(ids);
+  closeSheet();
+  renderSaved();
+  toast(t(ids.length === 1 ? 'deleteDoneOne' : 'deleteDoneMany'));
 }
 
 // ---------- events ----------
@@ -964,7 +1149,10 @@ document.addEventListener('click', (e) => {
   const b = e.target.closest('button, [data-close]');
   if (!b) return;
   const d = b.dataset;
-  if (d.close !== undefined) return closeSheet();
+  if (d.close !== undefined) { pendingSavedDeleteIds = []; return closeSheet(); }
+  if (d.newSetup !== undefined) { state.setupBackup = { config: setupConfig(), screen: state.screen }; openSetup(1, false); return; }
+  if (d.setupProfile) { const p = state.sessionSetups.find(x => x.id === d.setupProfile); if (p) activateSetup(p.config); return; }
+  if (d.removeSaved !== undefined) return confirmSavedPlanDeletion([d.removeSaved]);
   if (d.go) { if (d.plan) state.plan = +d.plan; renderPlans(); return go(d.go); }
   if (d.plan !== undefined && b.getAttribute('role') === 'tab') { state.plan = +d.plan; return renderPlans(); }
   if (d.layer) return setLayer(d.layer);
@@ -978,7 +1166,7 @@ document.addEventListener('click', (e) => {
   if (d.short) { state.shortage = d.short; renderBuild(); return recompute(); }
   if (d.src && ['wells', 'mix', 'canal'].includes(d.src)) { state.source = d.src; return renderSetup(); }
   if (d.exclude) { const c = d.exclude; state.excluded.has(c) ? state.excluded.delete(c) : state.excluded.add(c); b.setAttribute('aria-pressed', String(state.excluded.has(c))); persist(); if ($('#setup').hidden) recompute(); return; }
-  if (d.delplan) { removePlan(d.delplan); return; }
+  if (d.delplan) return confirmSavedPlanDeletion([d.delplan]);
   if (d.openplan) { const p = getPlans().find((x) => x.id === d.openplan); if (p) { state.build = p.rotation.slice(); renderBuild(); scoreBuild(); go('build'); } return; }
   // setup
   if (d.farm) { const f = FARMS.find((x) => x.id === d.farm); state.farm = { ...f }; return renderSetup(); }
@@ -988,11 +1176,19 @@ document.addEventListener('click', (e) => {
   if (d.setup === 'back') { setupStep--; return renderSetup(); }
   if (d.setup === 'next') { if (setupStep < 3) { setupStep++; return renderSetup(); } return finishSetup(); }
   if (d.setup === 'done') return finishSetup();
-  if (d.setup === 'cancel') { $('#setup').hidden = true; return; }
+  if (d.setup === 'cancel') { if (state.setupBackup) return cancelNewSetup(); $('#setup').hidden = true; return; }
   // actions
   const list = planList();
   const cur = list[Math.min(state.plan, list.length - 1)];
   switch (d.act) {
+    case 'manage-saved-plans': return manageSavedPlansSheet();
+    case 'show-saved-delete-list': return savedPlanDeleteListSheet();
+    case 'delete-all-saved': return confirmSavedPlanDeletion(getPlans().map(p => p.id));
+    case 'back-to-saved-delete-list': return savedPlanDeleteListSheet();
+    case 'confirm-saved-delete': return completeSavedPlanDeletion();
+    case 'export-data': state.exporting = true; return renderExportData();
+    case 'export-back': state.exporting = false; return renderPlans();
+    case 'export-download': return downloadExport();
     case 'retry': return loadField();
     case 'locate':
       if (!navigator.geolocation) return toast(t('locFail'));
