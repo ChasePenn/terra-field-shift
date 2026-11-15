@@ -1,0 +1,23 @@
+{
+  "name": "terra",
+  "private": true,
+  "version": "1.0.0",
+  "description": "**Crop rotations for a drier Arizona, built on NASA Earth observations.** NASA Space Apps Challenge 2026 · Field Shift: Adapting Farms with NASA Data",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "prepare:map": "node scripts/prepare-map.mjs",
+    "prestart": "npm run prepare:map",
+    "build:static": "npm ci && npm run prepare:map && npm run fetch:data",
+    "start": "python3 -m http.server 5000 --bind 0.0.0.0 --directory terra",
+    "fetch:data": "node scripts/fetch-data.mjs",
+    "test": "node terra/test/engine.test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "maplibre-gl": "^6.18.0"
+  }
+}
