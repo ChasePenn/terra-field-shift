@@ -19,7 +19,7 @@ from datetime import date, timedelta
 
 from openpyxl import load_workbook
 
-FARMS = {"casa": (32.88, -111.77), "cool": (32.985, -111.52), "mari": (33.09, -112.02), "buck": (33.38, -112.64)}
+FARMS = {"casa": (32.87, -111.80), "cool": (32.995, -111.49), "mari": (33.09, -111.99), "buck": (33.38, -112.64)}
 PAGE = "https://www.azwater.gov/gis-data-and-maps"
 # Remark codes from GWSI_MR_CODES: drop pumping, recently pumped, nearby pumping,
 # dry, flowing, obstructed, plugged, destroyed and similar non-static readings.

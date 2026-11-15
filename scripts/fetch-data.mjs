@@ -20,8 +20,8 @@ import { penmanMonteithET0, hargreavesET0, extraterrestrialRadiation, esat, dayO
 
 const OUT = 'terra/data';
 const FARMS = {
-  casa: [32.88, -111.77], cool: [32.985, -111.52],
-  mari: [33.09, -112.02], buck: [33.38, -112.64],
+  casa: [32.87, -111.80], cool: [32.995, -111.49],
+  mari: [33.09, -111.99], buck: [33.38, -112.64],
 };
 const START = '20041101', END = '20241031';
 const POWER = 'https://power.larc.nasa.gov/api/temporal/daily/point';

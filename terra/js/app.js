@@ -15,9 +15,9 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 const TYPES = yearTypes();
 const CAP_SHARE = { wells: 0, mix: 0.5, canal: 0.9 };
 const FARMS = [
-  { id: 'casa', lat: 32.88, lon: -111.77, name: 'Casa Grande', area: 'Pinal County' },
-  { id: 'cool', lat: 32.985, lon: -111.52, name: 'Coolidge', area: 'Pinal County' },
-  { id: 'mari', lat: 33.09, lon: -112.02, name: 'Maricopa', area: 'Pinal County' },
+  { id: 'casa', lat: 32.87, lon: -111.80, name: 'Casa Grande', area: 'Pinal County' },
+  { id: 'cool', lat: 32.995, lon: -111.49, name: 'Coolidge', area: 'Pinal County' },
+  { id: 'mari', lat: 33.09, lon: -111.99, name: 'Maricopa', area: 'Pinal County' },
   { id: 'buck', lat: 33.38, lon: -112.64, name: 'Buckeye', area: 'Maricopa County' },
 ];
 const PRESETS = [
