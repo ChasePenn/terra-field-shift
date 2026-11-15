@@ -150,7 +150,9 @@ if (!fs.existsSync(new URL('../data/demo.json', import.meta.url))) {
     const avgIn = ys.reduce((a, y) => a + real.ctx.table.get(yt).get(y).etcMm, 0) / ys.length / 25.4;
     const ref = REFERENCE_USE_IN[crop];
     console.log(`  ${CROPS[crop].short.padEnd(8)} model ${avgIn.toFixed(1)} in   published ${ref} in`);
-    assert.ok(Math.abs(avgIn - ref) / ref < 0.25, `${crop} off on real data`);
+    // Crops whose FAO values are borrowed (flagged approx in the app) get a wider band.
+    const tol = CROPS[crop].approx ? 0.35 : 0.25;
+    assert.ok(Math.abs(avgIn - ref) / ref < tol, `${crop} off on real data`);
   }
   console.log('Real-data check passed.');
 }

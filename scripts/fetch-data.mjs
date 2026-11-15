@@ -327,8 +327,10 @@ for (const [id, [lat, lon]] of Object.entries(FARMS)) {
   try { demo.wells[id] = await wells(lat, lon); console.log(`Wells ${id}: ${demo.wells[id].length} with long records`); } catch (e) { console.log(`Wells ${id}: skipped (${e.message})`); }
 }
 // ADWR wells (scripts/adwr_wells.py) are fuller than USGS for Arizona: use them when present.
-if (fs.existsSync(`${OUT}/wells.json`)) {
-  const adwr = JSON.parse(fs.readFileSync(`${OUT}/wells.json`));
+// If ADWR refuses the build server, use the same GWSI extract saved from a browser in scripts/static/.
+const wellsFile = fs.existsSync(`${OUT}/wells.json`) ? `${OUT}/wells.json` : fs.existsSync('scripts/static/wells-adwr.json') ? 'scripts/static/wells-adwr.json' : null;
+if (wellsFile) {
+  const adwr = JSON.parse(fs.readFileSync(wellsFile));
   for (const [id, list] of Object.entries(adwr.farms || {})) if (list.length >= (demo.wells[id]?.length || 0)) demo.wells[id] = list;
   demo.wellsSource = adwr.source;
   console.log('Wells: merged ADWR GWSI', Object.fromEntries(Object.entries(demo.wells).map(([k, v]) => [k, v.length])));

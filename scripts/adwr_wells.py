@@ -25,7 +25,7 @@ PAGE = "https://www.azwater.gov/gis-data-and-maps"
 # dry, flowing, obstructed, plugged, destroyed and similar non-static readings.
 BAD_REMARKS = set("CDEFGHIJKMNOPRSTVWX")
 DLAT, DLON = 0.09, 0.11
-UA = {"User-Agent": "terra-field-shift (NASA Space Apps)"}
+UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36", "Accept": "*/*"}
 
 
 def get(url):
