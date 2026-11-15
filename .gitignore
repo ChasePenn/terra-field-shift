@@ -221,7 +221,9 @@ __marimo__/
 
 # Built by the Pages workflow
 terra/data/demo.json
-terra/vendor/maplibre-gl*
 terra/data/validation.json
 terra/data/ama.json
 terra/data/wells.json
+
+# Installed packages
+node_modules/
