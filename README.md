@@ -34,12 +34,18 @@ The tests check that calendars never overlap, that excluded crops never appear, 
 
 ## How it works
 
-1. **Weather.** NASA POWER daily max and min temperature and rain for crop years 2005 to 2024 (Nov to Oct).
-2. **Reference water demand.** Hargreaves evapotranspiration (FAO-56 eq. 52) from temperature and latitude.
-3. **Crop water use.** FAO-56 crop coefficient curves for each crop and growth stage, adjusted for dry desert air (FAO-56 eq. 62). Irrigation need = crop water use minus 75% of rain. Gross water = need divided by irrigation efficiency (furrow 70%, sprinkler 80%, drip 90%).
-4. **Rotations.** Every 3-year plan that fits central Arizona planting dates: alfalfa stands, cotton (with an optional winter cover before it), or a winter crop (durum, barley, winter legume cover, or bare) followed by a summer crop (sorghum, guar, sesame, cowpea cover, or bare).
-5. **Replay.** Each plan runs through each real year. A year is red if the plan needs more than 115% of your water, yellow if it's over 100% or a crop hits a heat or freeze limit, green otherwise.
-6. **Scores.** Water (staying within your supply), soil health (living cover, legume seasons, plant-family diversity, pest breaks, deep roots, perennial years, minus bare spring months), bad-year safety (share of green years), and a rough income ranking. Your sliders weight them.
+1. **Weather.** NASA POWER daily max and min temperature, dew point, wind, sunlight and rain for crop years 2005 to 2024 (Nov to Oct).
+2. **Reference water demand.** FAO-56 Penman-Monteith (eq. 6). Inside Arizona it is bias-corrected month by month against 12 University of Arizona AZMET farm weather stations (2020 to 2024); the check is leave-one-station-out and is shown in the app. Days missing sunlight, humidity or wind fall back to Hargreaves (eq. 52).
+3. **Crop water use.** FAO-56 crop coefficient curves, adjusted for dry desert air (eq. 62). Irrigation need = crop water use minus 75% of rain. Gross water = need divided by irrigation efficiency (flood 70%, sprinkler 80%, drip 90%).
+4. **Rotations.** Every 3-year plan that fits central Arizona planting dates, about 12,000 of them.
+5. **Replay.** Each plan runs through each real year at the farm's water supply after any Colorado River shortage (share of water from the CAP canal x the cut: 60% in 2022, 100% since 2023).
+6. **Money.** University of Arizona crop budgets and USDA NASS/ERS 2024 prices. Water is costed at the farmer's own price. When water runs short, yield drops by the FAO yield response factor (Ky). Shown as a range across the 20 years.
+7. **Heat.** 110°F days and their trend (Theil-Sen). Cotton canopy temperature from a model fitted to AZMET's own canopy temperature, counted against the University of Arizona heat stress threshold (82.4°F).
+8. **Groundwater.** ADWR management area for the field, and depth to water in nearby monitored wells (USGS Water Data, includes ADWR measurements).
+9. **Satellite check.** MODIS NDVI for 2020 to 2024 compared with the rotation the farmer says they grow.
+10. **Scores.** Water, soil health, dry-year safety and income (rank of average profit among all plans). Your priorities weight them.
+
+Outside Arizona the app runs in basic mode: same NASA data and water math, Arizona crop calendar and costs, no station calibration.
 
 ## Project layout
 
@@ -49,12 +55,17 @@ terra/
   css/styles.css    design
   js/crops.js       crop facts with sources
   js/engine.js      water model, rotations, scoring, explanations
+  js/et.js          Penman-Monteith, Hargreaves, canopy temperature
+  js/economics.js   crop budgets, prices, water shortage tiers
+  js/local.js       groundwater areas, well trends, satellite check
   js/nasa.js        NASA POWER, MODIS NDVI, GIBS layers, SoilGrids
   js/charts.js      rings, calendar strip, year replay, icons
   js/i18n.js        English and Spanish text
   js/worker.js      runs the engine off the main thread
   js/art.js         crop drawings and scenes
-  data/demo.json    real NASA data for the 4 demo farms (made by scripts/fetch-data.mjs)
+  data/demo.json    NASA weather, soil, NDVI and wells for 4 demo farms (made by scripts/fetch-data.mjs)
+  data/validation.json  model checks against 12 AZMET stations
+  data/ama.json     ADWR groundwater management areas
   vendor/           MapLibre GL map library (copied in by the workflow)
   js/app.js         interface
   sw.js             offline support
@@ -73,5 +84,5 @@ backend/, frontend/ first prototype (FastAPI), kept for reference
 - Planting dates and crop list are written for the central Arizona low desert. Elsewhere Terra still runs but marks confidence as low.
 - NASA POWER and SMAP cover areas miles wide, not one field. MODIS greenness is 250 m. GRACE covers whole regions.
 - Hargreaves can underestimate water demand where days and nights are close in temperature.
-- Income is a rough ranking, not a price forecast. Use the University of Arizona Pinal County crop budgets for real numbers.
+- Money uses 2024 Arizona yields and prices and published budgets, not your farm's books. Guar and sesame use Texas budgets because Arizona has none.
 - Guar, sesame and cover crop water use are approximate because FAO-56 has no exact values for them.

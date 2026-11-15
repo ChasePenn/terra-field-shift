@@ -584,6 +584,7 @@ function methodsCard() {
   if (v?.et0) {
     const rows = v.stations.filter((x) => x.days > 300).map((x) => ({ name: x.name, a: x.stationIn, b: x.calIn }));
     et = `<div class="sub-block"><h3>${t('mEtTitle')}</h3><p class="muted small">${t('mEtLine', { avg: v.et0.calibrated.meanAbsPct, max: v.et0.calibrated.maxAbsPct })} ${t('mEtRaw', { raw: v.et0.raw.meanAbsPct })}</p>
+      ${v.et0.methods ? `<p class="muted small">${t('mMethods', { chosen: t(`meth_${v.et0.chosen}`), pm: v.et0.methods.pmCal.meanAbsPct, hg: v.et0.methods.hgCal.meanAbsPct, blend: v.et0.methods.blend.meanAbsPct })}</p>` : ''}
       ${pairBars(rows, [`${t('mStation')} (in/yr)`, `${t('mOurs')} (in/yr)`])}${v.local ? `<p class="muted small">${t('mLocal')}</p>` : ''}</div>
       <div class="sub-block"><p>${t('mCanopy', { rmse: (v.canopy.rmseC * 1.8).toFixed(1), n: v.canopy.n.toLocaleString() })}</p></div>`;
   }

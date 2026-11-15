@@ -216,27 +216,39 @@ async function validation() {
   });
   const hgFactor = round(pairs.reduce((a, x) => a + x.eto, 0) / pairs.reduce((a, x) => a + x.hg, 0), 3);
 
-  // Leave-one-station-out: refit the factors without a station, test on it.
-  const yearly = (p, f) => p.reduce((a, x) => a + f(x), 0) / VAL_YEARS.length / 25.4;
-  for (const s of stations) {
-    const own = pairs.filter((x) => x.st === s.id);
-    const rest = pairs.filter((x) => x.st !== s.id);
-    const f = Array.from({ length: 12 }, (_, k) => {
-      const p = rest.filter((x) => x.m === k + 1);
-      return p.reduce((a, x) => a + x.eto, 0) / p.reduce((a, x) => a + x.pm, 0);
-    });
-    const share = own.length / (VAL_YEARS.length * 365.25);
-    s.stationIn = round(yearly(own, (x) => x.eto) / share, 1);
-    s.rawIn = round(yearly(own, (x) => x.pm) / share, 1);
-    s.hgIn = round(yearly(own, (x) => x.hg) / share, 1);
-    s.calIn = round(yearly(own, (x) => x.pm * f[x.m - 1]) / share, 1);
-  }
-  const pct = (a, b) => round((100 * (a - b)) / b, 1);
-  const err = (key) => {
-    const e = stations.filter((s) => s.days > 300).map((s) => Math.abs(pct(s[key], s.stationIn)));
-    return { meanAbsPct: round(mean(e), 1), maxAbsPct: round(Math.max(...e), 1) };
+  // Candidate methods, each scored leave-one-station-out: the factors used to
+  // test a station are fitted on the other 11 stations only.
+  const share = (own) => own.length / (VAL_YEARS.length * 365.25);
+  const yearly = (p, f) => p.reduce((a, x) => a + f(x), 0) / VAL_YEARS.length / 25.4 / share(p);
+  const fitMonthly = (p) => Array.from({ length: 12 }, (_, k) => { const q = p.filter((x) => x.m === k + 1); return q.reduce((a, x) => a + x.eto, 0) / q.reduce((a, x) => a + x.pm, 0); });
+  const fitHg = (p) => p.reduce((a, x) => a + x.eto, 0) / p.reduce((a, x) => a + x.hg, 0);
+  const methods = {
+    pmRaw: () => (x) => x.pm,
+    hgRaw: () => (x) => x.hg,
+    pmCal: (rest) => { const f = fitMonthly(rest); return (x) => x.pm * f[x.m - 1]; },
+    hgCal: (rest) => { const h = fitHg(rest); return (x) => x.hg * h; },
+    blend: (rest) => { const f = fitMonthly(rest), h = fitHg(rest); return (x) => 0.5 * (x.pm * f[x.m - 1] + x.hg * h); },
   };
-  const dailyRmse = (f) => round(Math.sqrt(mean(pairs.map((x) => (f(x) - x.eto) ** 2))), 2);
+  const pct = (a, b) => (100 * (a - b)) / b;
+  const scored = {};
+  for (const [name, make] of Object.entries(methods)) {
+    const errs = [], sq = [];
+    for (const s of stations) {
+      const own = pairs.filter((x) => x.st === s.id);
+      if (own.length < 300) continue;
+      const fn = make(pairs.filter((x) => x.st !== s.id));
+      s.stationIn = round(yearly(own, (x) => x.eto), 1);
+      s[name] = round(yearly(own, fn), 1);
+      errs.push(Math.abs(pct(s[name], s.stationIn)));
+      for (const x of own) sq.push((fn(x) - x.eto) ** 2);
+    }
+    scored[name] = { meanAbsPct: round(mean(errs), 1), maxAbsPct: round(Math.max(...errs), 1), dailyRmseMm: round(Math.sqrt(mean(sq)), 2) };
+  }
+  // The app uses whichever calibrated method did best on held-out stations.
+  const best = ['pmCal', 'hgCal', 'blend'].sort((a, b) => scored[a].meanAbsPct - scored[b].meanAbsPct || scored[a].dailyRmseMm - scored[b].dailyRmseMm)[0];
+  const method = { pmCal: 'pm', hgCal: 'hg', blend: 'blend' }[best];
+  for (const s of stations) { s.calIn = s[best]; s.rawIn = s.pmRaw; s.hgIn = s.hgRaw; }
+  console.log('ET0 methods (held-out stations):', JSON.stringify(scored), 'chosen:', best);
 
   // Cotton canopy temperature: fit AZMET's daily canopy temperature from NASA
   // POWER temperature and humidity, summer days only (June to September).
@@ -254,11 +266,9 @@ async function validation() {
   return {
     period: '2020-2024', stations,
     et0: {
-      monthlyFactor: factor, hgFactor,
-      raw: { ...err('rawIn'), dailyRmseMm: dailyRmse((x) => x.pm) },
-      hargreaves: { ...err('hgIn'), dailyRmseMm: dailyRmse((x) => x.hg) },
-      calibrated: { ...err('calIn'), dailyRmseMm: dailyRmse((x) => x.pm * factor[x.m - 1]) },
-      note: 'Calibrated values are leave-one-station-out: each station is tested with factors fitted on the other stations.',
+      method, chosen: best, monthlyFactor: factor, hgFactor, methods: scored,
+      raw: scored.pmRaw, hargreaves: scored.hgRaw, calibrated: scored[best],
+      note: 'All errors are leave-one-station-out: each station is tested with factors fitted on the other 11.',
     },
     canopy,
   };
@@ -278,6 +288,19 @@ for (const [id, [lat, lon]] of Object.entries(FARMS)) {
   try { const s = await soil(lat, lon); if (s) demo.soil[id] = s; console.log(`SoilGrids ${id}: ${s ? 'ok' : 'none'}`); } catch (e) { console.log(`SoilGrids ${id}: skipped (${e.message})`); }
   try { demo.ndvi[id] = await ndvi(lat, lon); console.log(`MODIS ${id}: ${demo.ndvi[id].length} composites`); } catch (e) { console.log(`MODIS ${id}: skipped (${e.message})`); }
   try { demo.wells[id] = await wells(lat, lon); console.log(`Wells ${id}: ${demo.wells[id].length} with long records`); } catch (e) { console.log(`Wells ${id}: skipped (${e.message})`); }
+}
+// ADWR wells (scripts/adwr_wells.py) are fuller than USGS for Arizona: use them when present.
+if (fs.existsSync(`${OUT}/wells.json`)) {
+  const adwr = JSON.parse(fs.readFileSync(`${OUT}/wells.json`));
+  for (const [id, list] of Object.entries(adwr.farms || {})) if (list.length >= (demo.wells[id]?.length || 0)) demo.wells[id] = list;
+  demo.wellsSource = adwr.source;
+  console.log('Wells: merged ADWR GWSI', Object.fromEntries(Object.entries(demo.wells).map(([k, v]) => [k, v.length])));
+}
+// MODIS service often refuses cloud servers. Fall back to the same MODIS data
+// pulled earlier from a normal browser and kept in scripts/static/.
+if (fs.existsSync('scripts/static/ndvi-demo.json')) {
+  const st = JSON.parse(fs.readFileSync('scripts/static/ndvi-demo.json'));
+  for (const [id, rows] of Object.entries(st.farms)) if (!(demo.ndvi[id]?.length > 20)) demo.ndvi[id] = rows;
 }
 fs.writeFileSync(`${OUT}/demo.json`, JSON.stringify(demo));
 

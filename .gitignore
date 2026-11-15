@@ -225,3 +225,4 @@ terra/vendor/maplibre-gl.js
 terra/vendor/maplibre-gl.css
 terra/data/validation.json
 terra/data/ama.json
+terra/data/wells.json

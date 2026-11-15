@@ -33,6 +33,8 @@ export function prepareWeather(weather, stress = { dT: 0, rainPct: 0 }, calib = 
   const az = calib && inArizona(weather.lat, weather.lon ?? 0);
   const mf = az ? calib.monthlyFactor : null;
   const hgF = az ? calib.hgFactor || 1 : 1;
+  // Which calibrated method won on held-out AZMET stations: 'pm', 'hg' or 'blend'.
+  const method = az ? calib.method || 'pm' : 'pm';
   let pmDays = 0;
   const n = weather.dates.length;
   const days = new Array(n);
@@ -46,8 +48,12 @@ export function prepareWeather(weather, stress = { dT: 0, rainPct: 0 }, calib = 
     const dew = weather.dew ? weather.dew[i] : null;
     const day = { y, m, d, tmax, tmin, rain, dew, u2: weather.u2 ? weather.u2[i] : null, rs: weather.rs ? weather.rs[i] : null };
     const r = dailyET0(day, weather.lat, weather.z, hgF);
-    day.et0 = r.method === 'pm' && mf ? r.et0 * mf[m - 1] : r.et0;
-    if (r.method === 'pm') pmDays++;
+    const hg = hgF * hargreavesET0(tmax, tmin, extraterrestrialRadiation(weather.lat, dayOfYear(y, m, d)));
+    if (r.method === 'pm') {
+      pmDays++;
+      const pm = mf ? r.et0 * mf[m - 1] : r.et0;
+      day.et0 = method === 'hg' ? hg : method === 'blend' ? 0.5 * (pm + hg) : pm;
+    } else day.et0 = hg;
     days[i] = day;
     index.set(s, i);
   }
@@ -61,7 +67,7 @@ export function prepareWeather(weather, stress = { dT: 0, rainPct: 0 }, calib = 
     }
     if (have >= 0.95 * 365) cropYears.push(cy);
   }
-  return { lat: weather.lat, days, index, cropYears, pmShare: n ? pmDays / n : 0, calibrated: !!mf };
+  return { lat: weather.lat, days, index, cropYears, pmShare: n ? pmDays / n : 0, calibrated: !!mf, method: az ? method : 'pm' };
 }
 
 function keyOf(t) {
