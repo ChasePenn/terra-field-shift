@@ -78,9 +78,14 @@ for (const o of [res.baseline, ...res.options]) {
 console.log('Baseline: ' + res.baseline.labels.join(' | ') + `  ${res.baseline.netAcft.toFixed(2)} ac-ft/ac`, res.baseline.scores);
 for (const o of res.options) console.log('Option:   ' + o.labels.join(' | ') + `  ${o.netAcft.toFixed(2)} ac-ft/ac`, o.scores, o.confidence.level);
 
-// 6. Priorities change the ranking.
-const incomeFirst = run(fixture(), { ...inputs, weights: { water: 0, soil: 0, resilience: 0, income: 5 } });
-assert.notDeepEqual(incomeFirst.options[0].rotation, res.options[0].rotation, 'income-first should rank differently');
+// 6. Each named plan really leads its goal.
+const real = (r) => r.seq.filter((x) => x.parts.some((c) => CROPS[c]?.role === 'cash')).length >= 2 && !r.seq.every((x, _, a) => x.parts.filter((c) => CROPS[c]?.role === 'cash').join() === a[0].parts.filter((c) => CROPS[c]?.role === 'cash').join() && a[0].parts.some((c) => CROPS[c]?.role === 'cash'));
+const others = res.all.filter((r) => r.rotation.join() !== inputs.baseline.join() && real(r));
+const inc = res.options.find((o) => o.lenses.includes('income'));
+assert.ok(others.every((r) => r.money.mean <= inc.money.mean + 1e-9), 'Most income plan must earn the most');
+assert.ok(others.every((r) => r.scores.income <= inc.scores.income), 'Most income plan must have the top income score');
+const wat = res.options.find((o) => o.lenses.includes('water'));
+assert.ok(res.options.every((o) => o.netAcft >= wat.netAcft - 1e-9), 'Least water plan must use the least water of the options');
 
 // 7. Hotter, drier weather raises water need.
 const hot = run(fixture(), { ...inputs, stress: { dT: 2, rainPct: -20 } });

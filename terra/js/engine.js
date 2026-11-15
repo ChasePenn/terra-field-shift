@@ -325,7 +325,7 @@ export function evaluate(rotation, ctx) {
   const money = { mean: avg(profits), low: quantile(profits, 0.1), high: quantile(profits, 0.9), cash: avg(cashes), cashLow: quantile(cashes, 0.1), cashHigh: quantile(cashes, 0.9), waterCost: avg(replay.map((r) => r.waterCost)), revenue: avg(replay.map((r) => r.revenue)) };
   // What each Colorado River shortage level would do to this plan.
   const tiers = {};
-  if (ctx.lite) return { money, grossAcft };
+  if (ctx.lite) return { money, grossAcft, rotation };
   for (const tier of Object.keys(SHORTAGE)) {
     const rep = tier === (ctx.shortage || 'none') ? replay : outcome(supplyAfter(allotment, ctx.capShare || 0, tier));
     tiers[tier] = { good: rep.filter((r) => r.status === 'good').length, profit: avg(rep.map((r) => r.profit)), cash: avg(rep.map((r) => r.cash)), supply: supplyAfter(allotment, ctx.capShare || 0, tier) };
@@ -383,7 +383,9 @@ export function evaluate(rotation, ctx) {
   const shortfalls = replay.map((r) => Math.max(0, 1 - supply / (r.worstGross || 1))).sort((a, b) => b - a);
   const worst3 = avg(shortfalls.slice(0, 3));
   // Income: where this plan's average profit sits among all plans checked.
-  const income = ctx.profitRank ? clamp(100 * rankOf(ctx.profitRank, money.mean)) : 50;
+  // Income score: where this plan's average profit sits between a weak plan (10th percentile) and the best plan.
+  const pr = ctx.profitRank;
+  const income = pr ? clamp(100 * (money.mean - quantile(pr, 0.1)) / Math.max(1, pr[pr.length - 1] - quantile(pr, 0.1))) : 50;
 
   const w = ctx.weights;
   const wsum = w.water + w.soil + w.resilience + w.income || 1;
@@ -517,17 +519,36 @@ export function run(weather, inputs) {
   // First pass finds every plan's profit, second pass scores income against them.
   ctx.lite = true;
   const lite = rots.map((rot) => evaluate(rot, ctx));
-  ctx.profitRank = lite.map((x) => x.money.mean).sort((a, b) => a - b);
+  // A real plan sells a crop in at least 2 of 3 years and does not plant the same cash crop all 3 years.
+  const cash = (id) => id.split('+').filter((c) => CROPS[c]?.role === 'cash');
+  const cashYears = (r) => r.rotation.filter((id) => cash(id).length).length;
+  const mono = (r) => { const ids = r.rotation.map((id) => cash(id).join('+')); return ids[0] && ids.every((x) => x === ids[0]); };
+  const realPlan = (r) => cashYears(r) >= 2 && !mono(r);
+  ctx.profitRank = lite.filter(realPlan).map((x) => x.money.mean).sort((a, b) => a - b);
   ctx.waterRank = lite.map((x) => x.grossAcft).sort((a, b) => a - b);
   ctx.lite = false;
   const all = rots.map((rot) => evaluate(rot, ctx));
   const baseline = evaluate(inputs.baseline, ctx);
-  const options = rank(all, inputs.baseline, inputs.count || 3);
-  // Always offer the plan that held up best in this field's worst past years:
-  // most years within supply, then smallest shortfall in the three worst years, then income.
-  const safest = all.filter((r) => r.rotation.join() !== inputs.baseline.join())
-    .sort((a, b) => b.detail.good - a.detail.good || a.detail.worst3 - b.detail.worst3 || b.money.mean - a.money.mean)[0];
-  if (safest) { safest.safest = true; if (!options.includes(safest)) options.push(safest); }
+  // One plan per goal, each the true leader for that goal, so the names never lie.
+  const pool = all.filter((r) => r.rotation.join() !== inputs.baseline.join() && realPlan(r));
+  const totals = pool.map((r) => r.scores.total).sort((a, b) => a - b);
+  const strong = pool.filter((r) => r.scores.total >= quantile(totals, 0.7)); // skip silly plans like leaving the field bare
+  const top = (list, cmp) => [...list].sort(cmp)[0];
+  const leaders = [
+    ['income', top(pool, (a, b) => b.money.mean - a.money.mean || b.scores.total - a.scores.total)],
+    ['water', top(strong, (a, b) => a.netAcft - b.netAcft || b.scores.total - a.scores.total)],
+    ['soil', top(strong, (a, b) => b.scores.soil - a.scores.soil || b.scores.total - a.scores.total)],
+    // Held up best in this field's worst past years: most years within supply, smallest shortfall in the 3 worst, then income.
+    ['safe', top(pool, (a, b) => b.detail.good - a.detail.good || a.detail.worst3 - b.detail.worst3 || b.money.mean - a.money.mean)],
+  ];
+  const options = [];
+  for (const [lens, r] of leaders) {
+    if (!r) continue;
+    r.lenses = r.lenses || [];
+    r.lenses.push(lens);
+    if (lens === 'safe') r.safest = true;
+    if (!options.includes(r)) options.push(r);
+  }
   for (const o of [baseline, ...options]) { o.explain = explain(o, baseline); o.plan = monthPlan(o); }
   return { prep: ctx.prep, climate: climate(ctx.prep, ctx.canopy), baseline, options, all, ctx };
 }

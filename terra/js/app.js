@@ -381,23 +381,9 @@ function gal(acft) {
 
 // Name each option by what it does best compared with the others.
 function optionNames(list) {
-  const opts = list.slice(1);
-  const used = new Set();
-  const picks = [
-    ['nameWater', (o) => -o.netAcft],
-    ['nameSoil', (o) => o.scores.soil],
-    ['nameIncome', (o) => o.scores.income],
-    ['nameSafe', (o) => o.scores.resilience],
-  ];
-  const names = opts.map((o) => (o.safest ? 'nameSafe' : null));
-  if (opts.some((o) => o.safest)) used.add('nameSafe');
-  for (const [key, f] of picks) {
-    if (used.has(key)) continue;
-    let best2 = -1, bv2 = -Infinity;
-    opts.forEach((o, i) => { if (!names[i] && f(o) > bv2) { bv2 = f(o); best2 = i; } });
-    if (best2 >= 0) { names[best2] = key; used.add(key); }
-  }
-  return [t('now'), ...names.map((k, i) => (k ? t(k) : t('option', { n: i + 1 })))];
+  const key = { income: 'nameIncome', water: 'nameWater', soil: 'nameSoil', safe: 'nameSafe' };
+  const names = list.slice(1).map((o) => (o.lenses || []).map((l) => key[l]));
+  return [t('now'), ...names.map((ks, i) => (ks.length ? ks.map((k) => t(k)).join(' · ') : t('option', { n: i + 1 })))];
 }
 
 function waterDelta(r, base) {
